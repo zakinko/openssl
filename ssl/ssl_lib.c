@@ -710,6 +710,7 @@ int ossl_ssl_connection_reset(SSL *s)
                 /* The detached connection cannot unregister itself on free. */
                 ossl_dtls_listener_unregister_established_conn(saved_listener,
                     &saved_peer_addr);
+                ossl_dtls_listener_unregister_conn_cid(saved_listener, s);
                 ossl_crypto_mutex_lock(dl->mutex);
                 sc->listener_rx = NULL;
                 ossl_crypto_mutex_unlock(dl->mutex);
@@ -4233,6 +4234,17 @@ int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len)
         ERR_raise(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
         return 0;
     }
+#if !defined(OPENSSL_NO_SOCK)
+    /*
+     * A DTLS listener that routes by CID chose this connection's CID and
+     * finds it by that; another one would leave it unreachable.
+     */
+    if (sc->d1 != NULL && sc->d1->listener != NULL
+        && ossl_dtls_listener_cid_len(sc->d1->listener) != 0) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+        return 0;
+    }
+#endif
 
     if (cid_len != 0 && (own = OPENSSL_memdup(cid, cid_len)) == NULL)
         return 0;
@@ -7469,6 +7481,13 @@ void SSL_CTX_set_new_pending_conn_cb(SSL_CTX *c, SSL_new_pending_conn_cb_fn cb,
 {
     c->new_pending_conn_cb = cb;
     c->new_pending_conn_arg = arg;
+}
+
+void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
+    SSL_dtls_peer_addr_change_cb_fn cb, void *arg)
+{
+    c->dtls_peer_addr_change_cb = cb;
+    c->dtls_peer_addr_change_arg = arg;
 }
 
 #ifndef OPENSSL_NO_DEPRECATED_4_0

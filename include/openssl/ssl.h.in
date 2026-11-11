@@ -2019,6 +2019,30 @@ typedef int (*SSL_new_pending_conn_cb_fn)(SSL_CTX *ctx, SSL *new_ssl,
 void SSL_CTX_set_new_pending_conn_cb(SSL_CTX *c, SSL_new_pending_conn_cb_fn cb,
     void *arg);
 
+/**
+ * @brief Callback asked whether a DTLS connection may send to a new peer
+ * address (RFC 9146 section 6).
+ * @param s the connection
+ * @param old_addr the address the connection sends to now
+ * @param new_addr the source of a newer record that passed verification
+ * @param arg the argument given to SSL_CTX_set_dtls_peer_addr_change_cb()
+ * @returns 1 to send to @p new_addr from now on, 0 to keep @p old_addr
+ * @see SSL_CTX_set_dtls_peer_addr_change_cb(3)
+ */
+typedef int (*SSL_dtls_peer_addr_change_cb_fn)(SSL *s,
+    const BIO_ADDR *old_addr, const BIO_ADDR *new_addr, void *arg);
+
+/**
+ * @brief Set the callback that decides DTLS peer address changes for
+ * connections made from @p c by a DTLS listener.
+ * @param c the SSL_CTX
+ * @param cb the callback, or NULL to never change the address
+ * @param arg passed to @p cb
+ * @see SSL_CTX_set_dtls_peer_addr_change_cb(3)
+ */
+void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
+    SSL_dtls_peer_addr_change_cb_fn cb, void *arg);
+
 #ifndef OPENSSL_NO_DEPRECATED_4_0
 OSSL_DEPRECATEDIN_4_0 int SSL_client_hello_isv2(SSL *s);
 #endif
@@ -2511,6 +2535,7 @@ __owur int SSL_get_conn_close_info(SSL *ssl,
 #define SSL_VALUE_DTLS_LISTENER_MAX_PENDING_CONNS 17
 #define SSL_VALUE_DTLS_LISTENER_PENDING_TIMEOUT 18
 #define SSL_VALUE_DTLS_LISTENER_MAX_DGRAM_SIZE 19
+#define SSL_VALUE_DTLS_LISTENER_CID_LEN 20
 
 #define SSL_VALUE_EVENT_HANDLING_MODE_INHERIT 0
 #define SSL_VALUE_EVENT_HANDLING_MODE_IMPLICIT 1
