@@ -217,7 +217,7 @@ static int tls13_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *recs,
      *   tls13_post_process_record() for incoming records.
      */
     if (isdtls) {
-        exphdrlen = dtls_get_rec_header_size(rec->type);
+        exphdrlen = dtls_get_rec_header_size(rl, rec->type);
         sbit = DTLS13_UNI_HDR_SEQ_BIT_IS_SET(rec->type);
         addlen = DTLS13_UNI_HDR_LEN_BIT_IS_SET(rec->type);
         /* Match the truncated value encoded in the unified header. */

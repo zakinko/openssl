@@ -368,6 +368,12 @@ struct ossl_record_method_st {
      * of the previous record layer.
      */
     int (*set_prev_epoch_rl)(OSSL_RECORD_LAYER *rl, OSSL_RECORD_LAYER *prev);
+
+    /*
+     * Length of the Connection ID in the records of a DTLS record layer, 0
+     * for none.  NULL in the other record methods.
+     */
+    size_t (*get_cid_len)(OSSL_RECORD_LAYER *rl);
 };
 
 /* Standard built-in record methods */

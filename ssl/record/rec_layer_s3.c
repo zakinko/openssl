@@ -1323,7 +1323,7 @@ int ssl_set_new_record_layer(SSL_CONNECTION *s, int version,
     const SSL_COMP *comp, const EVP_MD *kdfdigest)
 {
     OSSL_PARAM options[5], *opts = options;
-    OSSL_PARAM settings[6], *set = settings;
+    OSSL_PARAM settings[7], *set = settings;
     const OSSL_RECORD_METHOD **thismethod;
     OSSL_RECORD_LAYER **thisrl, *newrl = NULL;
     BIO *thisbio;
@@ -1462,6 +1462,31 @@ int ssl_set_new_record_layer(SSL_CONNECTION *s, int version,
         if (max_early_data != 0)
             *set++ = OSSL_PARAM_construct_uint32(OSSL_LIBSSL_RECORD_LAYER_PARAM_MAX_EARLY_DATA,
                 &max_early_data);
+    }
+
+    /*
+     * RFC 9146 section 3: with a non-zero length CID negotiated for a
+     * direction, records in that direction use the tls12_cid format "once
+     * encryption is enabled"; "Plaintext payloads never use the new record
+     * format".  The CID read is the one we sent in our extension, the CID
+     * written the one from the peer's.
+     */
+    if (SSL_CONNECTION_IS_DTLS(s) && version != DTLS1_3_VERSION
+        && level == OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
+        && s->ext.dtls_cid.negotiated) {
+        unsigned char *cid;
+        size_t cid_len;
+
+        if (direction == OSSL_RECORD_DIRECTION_READ) {
+            cid = s->ext.dtls_cid.sent;
+            cid_len = s->ext.dtls_cid.sent_len;
+        } else {
+            cid = s->ext.dtls_cid.peer;
+            cid_len = s->ext.dtls_cid.peer_len;
+        }
+        if (cid_len != 0)
+            *set++ = OSSL_PARAM_construct_octet_string(OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID,
+                cid, cid_len);
     }
 
     *set = OSSL_PARAM_construct_end();
