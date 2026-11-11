@@ -700,6 +700,28 @@ EXT_RETURN tls_construct_ctos_etm(SSL_CONNECTION *s, WPACKET *pkt,
     return EXT_RETURN_SENT;
 }
 
+/*
+ * RFC 9146 section 3: "The extension_data field of this extension, when
+ * included in the ClientHello, MUST contain the ConnectionId structure."
+ */
+EXT_RETURN tls_construct_ctos_connection_id(SSL_CONNECTION *s, WPACKET *pkt,
+    unsigned int context,
+    X509 *x, size_t chainidx)
+{
+    if (!s->ext.dtls_cid.enabled)
+        return EXT_RETURN_NOT_SENT;
+#ifndef OPENSSL_NO_ECH
+    ECH_SAME_EXT(s, context, pkt)
+#endif
+
+    if (!tls_dtls_cid_construct(s, pkt)) {
+        /* SSLfatal() already called */
+        return EXT_RETURN_FAIL;
+    }
+
+    return EXT_RETURN_SENT;
+}
+
 #ifndef OPENSSL_NO_CT
 EXT_RETURN tls_construct_ctos_sct(SSL_CONNECTION *s, WPACKET *pkt,
     unsigned int context,
@@ -2261,6 +2283,35 @@ int tls_parse_stoc_etm(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
         && s->s3.tmp.new_cipher->algorithm_enc != SSL_KUZNYECHIK)
         s->ext.use_etm = 1;
 
+    return 1;
+}
+
+/*
+ * The server sent a "connection_id" extension, which it only does in answer
+ * to ours (RFC 9146 section 3; an unsolicited one has already been refused by
+ * tls_collect_extensions()).  It names the CID the server wants to receive,
+ * so it is the one we put in the records we send.
+ */
+int tls_parse_stoc_connection_id(SSL_CONNECTION *s, PACKET *pkt,
+    unsigned int context,
+    X509 *x, size_t chainidx)
+{
+    if (!tls_dtls_cid_parse(s, pkt)) {
+        /* SSLfatal() already called */
+        return 0;
+    }
+
+    /*
+     * The server accepted with a record protection whose CID form is not
+     * implemented here: see tls_dtls_cid_record_protection_ok().
+     */
+    if (!tls_dtls_cid_record_protection_ok(s)) {
+        SSLfatal(s, SSL_AD_HANDSHAKE_FAILURE,
+            SSL_R_CONNECTION_ID_NOT_SUPPORTED_WITH_CIPHER);
+        return 0;
+    }
+
+    s->ext.dtls_cid.negotiated = 1;
     return 1;
 }
 

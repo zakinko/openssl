@@ -113,11 +113,16 @@ static void dtls_set_in_init(OSSL_RECORD_LAYER *rl, int in_init)
     rl->in_init = in_init;
 }
 
-size_t dtls_get_rec_header_size(uint8_t hdr_first_byte)
+size_t dtls_get_rec_header_size(const OSSL_RECORD_LAYER *rl,
+    uint8_t hdr_first_byte)
 {
     size_t size = 0;
 
-    if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(hdr_first_byte)
+    if (hdr_first_byte == SSL3_RT_TLS12_CID && rl->version != DTLS1_3_VERSION
+        && rl->cid_len != 0) {
+        /* RFC 9146 section 4, Figure 3: the CID follows the sequence number */
+        size = DTLS1_RT_HEADER_LENGTH + rl->cid_len;
+    } else if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(hdr_first_byte)
         && ossl_assert(!DTLS13_UNI_HDR_CID_BIT_IS_SET(hdr_first_byte))) {
         /* DTLSv1.3 unified record header */
         size = 1;
@@ -138,7 +143,7 @@ static int dtls_process_record(OSSL_RECORD_LAYER *rl, DTLS_BITMAP *bitmap)
     TLS_RL_RECORD *rr;
     int imac_size;
     size_t mac_size = 0;
-    size_t rechdrsize = dtls_get_rec_header_size(rl->packet[0]);
+    size_t rechdrsize = dtls_get_rec_header_size(rl, rl->packet[0]);
     unsigned char md[EVP_MAX_MD_SIZE];
     unsigned char *macbuf = NULL;
     int ret = 0;
@@ -281,9 +286,13 @@ static int dtls_process_record(OSSL_RECORD_LAYER *rl, DTLS_BITMAP *bitmap)
 
     /*
      * Check if the received packet overflows the current Max Fragment
-     * Length setting.
+     * Length setting.  A tls12_cid record still holds the DTLSInnerPlaintext
+     * here, whose length "MUST NOT exceed 2^14" (RFC 9146 section 5); its
+     * content is checked against the Max Fragment Length once the real_type
+     * and padding are off, in dtls_cid_post_process_record().
      */
-    if (rr->length > rl->max_frag_len) {
+    if (rl->cid_len != 0 ? rr->length > SSL3_RT_MAX_PLAIN_LENGTH
+                         : rr->length > rl->max_frag_len) {
         RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
         goto end;
     }
@@ -493,6 +502,21 @@ static int dtls13_plaintext_allows_type(const OSSL_RECORD_LAYER *rl, int type)
  * ssl->s3.rrec.data    - data
  * ssl->s3.rrec.length  - number of bytes
  */
+/*
+ * Drop the rest of the datagram the current record came from.  A record whose
+ * length cannot be found also leaves the place of the next record unknown, so
+ * whatever follows it in the datagram is not a record boundary to resume at.
+ * read_n() takes one datagram into |rbuf| and reads the next one only when
+ * |rbuf.left| is zero, so emptying it ends the datagram.  RFC 6347 section
+ * 4.1.2.7: "invalid records SHOULD be silently discarded".
+ */
+static void dtls_discard_datagram(OSSL_RECORD_LAYER *rl)
+{
+    rl->rbuf.offset += rl->rbuf.left;
+    rl->rbuf.left = 0;
+    rl->packet_length = 0;
+}
+
 int dtls_get_more_records(OSSL_RECORD_LAYER *rl)
 {
     int rret;
@@ -503,6 +527,7 @@ int dtls_get_more_records(OSSL_RECORD_LAYER *rl)
     unsigned char recseqnum[6];
     size_t recseqnumlen = 0;
     size_t rechdrlen = 0;
+    size_t bodyoff;
     size_t recseqnumoffs = 0;
     int buffered_record = 0;
     OSSL_RECORD_LAYER *crypto_rl;
@@ -591,6 +616,19 @@ again:
             goto again;
         }
 
+        /*
+         * The unified header is the DTLS 1.3 record format (RFC 9147
+         * section 4); once an earlier version is negotiated no record has
+         * it, and its length cannot be relied on to find the next one.
+         */
+        if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(rr->type)
+            && rl->version != DTLS1_3_VERSION
+            && rl->version != DTLS_ANY_VERSION) {
+            dtls_discard_datagram(rl);
+            rr->length = 0;
+            goto again;
+        }
+
         if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(rr->type)) {
             /*
              * rfc9147:
@@ -658,6 +696,71 @@ again:
                     goto again;
                 }
             }
+        } else if (rr->type == SSL3_RT_TLS12_CID
+            && rl->version != DTLS1_3_VERSION) {
+            /*-
+             * RFC 9146 section 4, Figure 3:
+             *     struct {
+             *         ContentType outer_type = tls12_cid;
+             *         ProtocolVersion version;
+             *         uint16 epoch;
+             *         uint48 sequence_number;
+             *         opaque cid[cid_length];               // New field
+             *         uint16 length;
+             *         opaque enc_content[DTLSCiphertext.length];
+             *     } DTLSCiphertext;
+             * cid_length is not on the wire: it is the length of the CID we
+             * asked for (section 3).  Without one, as in a record layer
+             * that predates the handshake, the length field cannot be found.
+             */
+            PACKET cid;
+            size_t cidread = 0;
+
+            if (rl->cid_len == 0) {
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
+            }
+            rret = rl->funcs->read_n(rl, rl->cid_len, rl->cid_len, 1, 0,
+                &cidread);
+            if (rret < OSSL_RECORD_RETURN_SUCCESS || cidread != rl->cid_len) {
+                if (rl->alert != SSL_AD_NO_ALERT) {
+                    /* read_n() called RLAYERfatal() */
+                    return OSSL_RECORD_RETURN_FATAL;
+                }
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
+            }
+            nread += cidread;
+            /* read_n() with extend may have moved rl->packet */
+            if (!PACKET_buf_init(&dtlsrecord, rl->packet, rl->packet_length)
+                || !PACKET_forward(&dtlsrecord, 1)
+                || !PACKET_get_net_2(&dtlsrecord, &record_version)
+                || !PACKET_get_net_2(&dtlsrecord, &epoch)
+                || !PACKET_copy_bytes(&dtlsrecord, recseqnum, 6)
+                || !PACKET_get_sub_packet(&dtlsrecord, &cid, rl->cid_len)
+                || !PACKET_get_net_2(&dtlsrecord, &length)) {
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
+            }
+            /*
+             * RFC 9146 section 3: "if the tls12_cid content type is set, then
+             * the CID is used to look up the connection and the security
+             * association."  This record layer serves one association; a CID
+             * other than ours names another one, or none, and the record is
+             * invalid here (RFC 6347 section 4.1.2.7).  The CID is not
+             * secret, so the comparison need not be constant time.
+             */
+            if (memcmp(PACKET_data(&cid), rl->cid, rl->cid_len) != 0) {
+                rr->length = 0;
+                rl->packet_length = 0;
+                goto again;
+            }
+            epoch64 = epoch;
+            recseqnumoffs = 0;
+            recseqnumlen = 6;
         } else {
             if (!PACKET_get_net_2(&dtlsrecord, &record_version)
                 || !PACKET_get_net_2(&dtlsrecord, &epoch)
@@ -670,6 +773,25 @@ again:
             epoch64 = epoch;
             recseqnumoffs = 0;
             recseqnumlen = 6;
+
+            /*
+             * RFC 9146 section 3: "If the tls12_cid content type is not set,
+             * then ... a check MUST be made to determine whether a
+             * non-zero-length CID is expected.  If a non-zero-length CID is
+             * expected for the retrieved association, then the datagram MUST
+             * be treated as invalid".  A CID is expected in the records of
+             * the epoch whose keys this record layer holds; records of other
+             * epochs are dealt with by the epoch checks below.  The section
+             * cites RFC 6347 section 4.1.2.1 for "invalid", which is the MAC
+             * section; the handling of invalid records is section 4.1.2.7,
+             * which says to discard them silently.  The whole datagram is
+             * invalid, so all of it goes.
+             */
+            if (rl->cid_len != 0 && epoch64 == rl->epoch) {
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
+            }
         }
 
         rechdrlen = PACKET_data(&dtlsrecord) - rl->packet;
@@ -727,7 +849,16 @@ again:
 
     /* rl->rstate == SSL_ST_READ_BODY, get and decode the data */
 
-    if (rr->length > rl->packet_length - DTLS1_RT_HEADER_LENGTH) {
+    /*
+     * The header of a tls12_cid record is longer than DTLS1_RT_HEADER_LENGTH
+     * by the CID; measure what of the body is already in rl->packet from the
+     * real end of the header, which rl->packet[0] gives again on re-entry.
+     */
+    bodyoff = DTLS1_RT_HEADER_LENGTH;
+    if (rl->packet[0] == SSL3_RT_TLS12_CID && rl->version != DTLS1_3_VERSION
+        && rl->cid_len != 0)
+        bodyoff = dtls_get_rec_header_size(rl, rl->packet[0]);
+    if (rr->length > rl->packet_length - bodyoff) {
         /* now rl->packet_length == DTLS1_RT_HEADER_LENGTH */
         more = rr->length - (nread - rechdrlen);
         rret = rl->funcs->read_n(rl, more, more, 1, 1, &nread);
@@ -1085,6 +1216,90 @@ err:
     return ret;
 }
 
+/*
+ * RFC 9146 section 4: once a non-zero length CID is in use, "the real content
+ * type is inside the encryption envelope": a record of this epoch is sent as
+ * tls12_cid(25) whatever its content.
+ */
+uint8_t dtls_cid_get_record_type(OSSL_RECORD_LAYER *rl,
+    OSSL_RECORD_TEMPLATE *template)
+{
+    if (rl->cid_len != 0)
+        return SSL3_RT_TLS12_CID;
+
+    return template->type;
+}
+
+/*-
+ * RFC 9146 section 4, Figure 2:
+ *     struct {
+ *         opaque content[length];
+ *         ContentType real_type;
+ *         uint8 zeros[length_of_padding];
+ *     } DTLSInnerPlaintext;
+ * The zeros are optional ("may appear") and none are sent.
+ */
+int dtls_cid_add_record_padding(OSSL_RECORD_LAYER *rl,
+    OSSL_RECORD_TEMPLATE *thistempl,
+    WPACKET *thispkt,
+    TLS_RL_RECORD *thiswr)
+{
+    if (rl->cid_len == 0)
+        return 1;
+
+    /*
+     * RFC 9146 section 5: length_of_DTLSInnerPlaintext "MUST NOT exceed
+     * 2^14".  ssl_get_max_send_fragment() keeps the content one byte short
+     * of that, so this does not fail unless that limit has been bypassed.
+     */
+    if (!ossl_assert(TLS_RL_RECORD_get_length(thiswr) < SSL3_RT_MAX_PLAIN_LENGTH)
+        || !WPACKET_put_bytes_u8(thispkt, thistempl->type)) {
+        RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return 0;
+    }
+    TLS_RL_RECORD_add_length(thiswr, 1);
+
+    return 1;
+}
+
+/*
+ * Take a decrypted tls12_cid record apart (RFC 9146 section 4, Figure 2) and
+ * leave its content and real_type in |rec|.  RFC 9146 section 4 refers to
+ * RFC 8446 section 5.4 for the padding, which says: "If a receiving
+ * implementation does not find a non-zero octet in the cleartext, it MUST
+ * terminate the connection with an "unexpected_message" alert."
+ */
+int dtls_cid_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec)
+{
+    size_t end;
+
+    if (rl->cid_len == 0)
+        return 1;
+
+    for (end = rec->length; end > 0 && rec->data[end - 1] == 0; end--)
+        continue;
+    if (end == 0) {
+        RLAYERfatal(rl, SSL_AD_UNEXPECTED_MESSAGE, SSL_R_BAD_RECORD_TYPE);
+        return 0;
+    }
+    rec->type = rec->data[end - 1];
+    rec->length = end - 1;
+
+    if (rec->length > rl->max_frag_len) {
+        RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
+        return 0;
+    }
+
+    if (rl->msg_callback != NULL) {
+        unsigned char ctype = (unsigned char)rec->type;
+
+        rl->msg_callback(0, rl->version, SSL3_RT_INNER_CONTENT_TYPE, &ctype,
+            1, rl->cbarg);
+    }
+
+    return 1;
+}
+
 int dtls_prepare_record_header(OSSL_RECORD_LAYER *rl,
     WPACKET *thispkt,
     OSSL_RECORD_TEMPLATE *templ,
@@ -1130,6 +1345,9 @@ int dtls_prepare_record_header(OSSL_RECORD_LAYER *rl,
             || !WPACKET_put_bytes_u16(thispkt, templ->version)
             || !WPACKET_put_bytes_u16(thispkt, templ->epoch)
             || !WPACKET_put_bytes_u48(thispkt, templ->sequence_number)
+            /* RFC 9146 section 4, Figure 3: cid[cid_length] */
+            || (rectype == SSL3_RT_TLS12_CID
+                && !WPACKET_memcpy(thispkt, rl->cid, rl->cid_len))
             || !WPACKET_start_sub_packet_u16(thispkt)
             || (rl->eivlen > 0
                 && !WPACKET_allocate_bytes(thispkt, rl->eivlen, NULL))
@@ -1183,6 +1401,14 @@ static size_t dtls_get_max_record_overhead(OSSL_RECORD_LAYER *rl)
     /* DTLSv1.3 adds an extra content type byte after payload data */
     if (rl->version == DTLS1_3_VERSION)
         contenttypelen = 1;
+
+    /*
+     * So does a DTLS 1.2 record with a CID (RFC 9146 section 4, Figure 2),
+     * whose header also carries the CID (Figure 3), which
+     * tls_get_record_header_len() does not count.
+     */
+    if (rl->cid_len != 0)
+        contenttypelen = 1 + rl->cid_len;
 
     /*
      * If we have a cipher in place then the tag is mandatory. If the cipher is
