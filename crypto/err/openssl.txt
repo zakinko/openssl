@@ -1410,6 +1410,8 @@ SSL_R_COMPRESSION_FAILURE:141:compression failure
 SSL_R_COMPRESSION_ID_NOT_WITHIN_PRIVATE_RANGE:307:\
 	compression id not within private range
 SSL_R_COMPRESSION_LIBRARY_ERROR:142:compression library error
+SSL_R_CONNECTION_ID_NOT_SUPPORTED_WITH_CIPHER:427:\
+	connection id not supported with cipher
 SSL_R_CONNECTION_TYPE_NOT_SET:144:connection type not set
 SSL_R_CONN_USE_ONLY:356:conn use only
 SSL_R_CONTEXT_NOT_DANE_ENABLED:167:context not dane enabled

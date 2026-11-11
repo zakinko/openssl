@@ -647,6 +647,7 @@ my %params = (
     'OSSL_LIBSSL_RECORD_LAYER_PARAM_MAX_EARLY_DATA' => "max_early_data",
     'OSSL_LIBSSL_RECORD_LAYER_PARAM_BLOCK_PADDING' =>  "block_padding",
     'OSSL_LIBSSL_RECORD_LAYER_PARAM_HS_PADDING' =>     "hs_padding",
+    'OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID' =>       "dtls_cid",
 
 # Symmetric Key parameters
     'OSSL_SKEY_PARAM_ALIAS' => "skey-alias",

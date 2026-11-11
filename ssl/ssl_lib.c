@@ -1636,6 +1636,9 @@ void ossl_ssl_connection_free(SSL *ssl)
     OPENSSL_free(s->ext.scts);
 #endif
     OPENSSL_free(s->ext.alpn);
+    OPENSSL_free(s->ext.dtls_cid.own);
+    OPENSSL_free(s->ext.dtls_cid.peer);
+    OPENSSL_free(s->ext.dtls_cid.sent);
     OPENSSL_free(s->ext.tls13_cookie);
     if (s->clienthello != NULL)
         OPENSSL_free(s->clienthello->pre_proc_exts);
@@ -4147,6 +4150,86 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
         *protos = p;
     if (protos_len != NULL)
         *protos_len = len;
+}
+
+/*
+ * SSL_set1_dtls_cid enables the DTLS 1.2 "connection_id" extension (RFC 9146)
+ * on |s| and sets the CID we want the peer to use when sending to us.  A
+ * zero length is allowed: it says that we will send with the peer's CID but do
+ * not want one in the records sent to us (RFC 9146 section 3).
+ */
+int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+    unsigned char *own = NULL;
+
+    if (sc == NULL || !SSL_CONNECTION_IS_DTLS(sc)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    /* RFC 9146 section 3: opaque cid<0..2^8-1> */
+    if (cid_len > SSL_DTLS_CID_MAX_LEN || (cid == NULL && cid_len != 0)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    /*
+     * The CID sent in our extension is the one the record layer for the
+     * next epoch will expect, so it cannot change between the two.
+     */
+    if (SSL_in_init(s) && !SSL_in_before(s)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+        return 0;
+    }
+
+    if (cid_len != 0 && (own = OPENSSL_memdup(cid, cid_len)) == NULL)
+        return 0;
+
+    OPENSSL_free(sc->ext.dtls_cid.own);
+    sc->ext.dtls_cid.own = own;
+    sc->ext.dtls_cid.own_len = cid_len;
+    sc->ext.dtls_cid.enabled = 1;
+    return 1;
+}
+
+/*
+ * SSL_clear_dtls_cid stops offering or accepting the "connection_id"
+ * extension from the next handshake on.  A CID already in use by the current
+ * epoch stays in use until the next handshake replaces the keys.
+ */
+void SSL_clear_dtls_cid(SSL *s)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+
+    if (sc == NULL)
+        return;
+
+    OPENSSL_free(sc->ext.dtls_cid.own);
+    sc->ext.dtls_cid.own = NULL;
+    sc->ext.dtls_cid.own_len = 0;
+    sc->ext.dtls_cid.enabled = 0;
+}
+
+/*
+ * SSL_get0_dtls_cid returns 1 if the "connection_id" extension was negotiated
+ * in the last handshake, and 0 otherwise.  |own| is the CID in the records we
+ * receive and |peer| the CID in the records we send; either may have a zero
+ * length, which means no CID in that direction.
+ */
+int SSL_get0_dtls_cid(const SSL *s, const unsigned char **own,
+    size_t *own_len, const unsigned char **peer, size_t *peer_len)
+{
+    const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
+    int negotiated = sc != NULL && sc->ext.dtls_cid.negotiated;
+
+    if (own != NULL)
+        *own = negotiated ? sc->ext.dtls_cid.sent : NULL;
+    if (own_len != NULL)
+        *own_len = negotiated ? sc->ext.dtls_cid.sent_len : 0;
+    if (peer != NULL)
+        *peer = negotiated ? sc->ext.dtls_cid.peer : NULL;
+    if (peer_len != NULL)
+        *peer_len = negotiated ? sc->ext.dtls_cid.peer_len : 0;
+    return negotiated;
 }
 
 /*
@@ -7734,12 +7817,26 @@ uint32_t SSL_get_recv_max_early_data(const SSL *s)
 
 __owur unsigned int ssl_get_max_send_fragment(const SSL_CONNECTION *sc)
 {
+    unsigned int frag;
+
     /* Return any active Max Fragment Len extension */
     if (sc->session != NULL && USE_MAX_FRAGMENT_LENGTH_EXT(sc->session))
-        return GET_MAX_FRAGMENT_LENGTH(sc->session);
+        frag = GET_MAX_FRAGMENT_LENGTH(sc->session);
+    else
+        frag = (unsigned int)sc->max_send_fragment;
 
-    /* return current SSL connection setting */
-    return (unsigned int)sc->max_send_fragment;
+    /*
+     * RFC 9146 section 5: the length of the DTLSInnerPlaintext, which is the
+     * content plus the one byte real_type (section 4, Figure 2), "MUST NOT
+     * exceed 2^14".  So a record sent with a CID carries one byte less than
+     * a DTLS 1.2 record without one.
+     */
+    if (SSL_CONNECTION_IS_DTLS(sc) && sc->version != DTLS1_3_VERSION
+        && sc->ext.dtls_cid.negotiated && sc->ext.dtls_cid.peer_len != 0
+        && frag > SSL3_RT_MAX_PLAIN_LENGTH - 1)
+        frag = SSL3_RT_MAX_PLAIN_LENGTH - 1;
+
+    return frag;
 }
 
 __owur unsigned int ssl_get_split_send_fragment(const SSL_CONNECTION *sc)
