@@ -499,6 +499,7 @@ static const ssl_trace_tbl ssl_exts_tbl[] = {
     { TLSEXT_TYPE_post_handshake_auth, "post_handshake_auth" },
     { TLSEXT_TYPE_signature_algorithms_cert, "signature_algorithms_cert" },
     { TLSEXT_TYPE_key_share, "key_share" },
+    { TLSEXT_TYPE_connection_id, "connection_id" },
     { TLSEXT_TYPE_renegotiate, "renegotiate" },
 #ifndef OPENSSL_NO_NEXTPROTONEG
     { TLSEXT_TYPE_next_proto_neg, "next_proto_neg" },
