@@ -318,15 +318,15 @@ static const EXTENSION_DEFINITION ext_defs[] = {
         init_etm, tls_parse_ctos_etm, tls_parse_stoc_etm,
         tls_construct_stoc_etm, tls_construct_ctos_etm, NULL },
     /*
-     * RFC 9146 section 3: ClientHello and ServerHello, DTLS only.  This
-     * implements the DTLS 1.2 record format only; the DTLS 1.3 use of the
-     * extension (RFC 9147 section 9) is not implemented, so the extension is
-     * not negotiated in DTLS 1.3.  It must come after encrypt_then_mac, whose
-     * outcome tls_dtls_cid_record_protection_ok() depends on.
+     * RFC 9146 section 3: ClientHello and ServerHello, DTLS only; in DTLS
+     * 1.3 the same (RFC 9147 section 9.1, "The "connection_id" extension,
+     * which is used in ClientHello and ServerHello messages, is defined in
+     * [RFC9146]").  It must come after encrypt_then_mac, whose outcome
+     * tls_dtls_cid_record_protection_ok() depends on.
      */
     { TLSEXT_TYPE_connection_id,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
-            | SSL_EXT_DTLS_ONLY | SSL_EXT_TLS1_2_AND_BELOW_ONLY,
+            | SSL_EXT_TLS1_3_SERVER_HELLO | SSL_EXT_DTLS_ONLY,
         OSSL_ECH_HANDLING_COMPRESS,
         init_connection_id, tls_parse_ctos_connection_id,
         tls_parse_stoc_connection_id, tls_construct_stoc_connection_id,
@@ -337,7 +337,7 @@ static const EXTENSION_DEFINITION ext_defs[] = {
      */
     { TLSEXT_TYPE_rrc,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
-            | SSL_EXT_DTLS_ONLY | SSL_EXT_TLS1_2_AND_BELOW_ONLY,
+            | SSL_EXT_TLS1_3_SERVER_HELLO | SSL_EXT_DTLS_ONLY,
         OSSL_ECH_HANDLING_COMPRESS,
         init_rrc, tls_parse_ctos_rrc, tls_parse_stoc_rrc,
         tls_construct_stoc_rrc, tls_construct_ctos_rrc, NULL },
@@ -1692,6 +1692,8 @@ int tls_dtls_cid_parse(SSL_CONNECTION *s, PACKET *pkt)
  */
 int tls_dtls_cid_construct(SSL_CONNECTION *s, WPACKET *pkt)
 {
+    OSSL_PARAM params[2];
+
     if (!tls_dtls_cid_set_sent(s)
         || !WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_connection_id)
         || !WPACKET_start_sub_packet_u16(pkt)
@@ -1700,6 +1702,23 @@ int tls_dtls_cid_construct(SSL_CONNECTION *s, WPACKET *pkt)
         || !WPACKET_close(pkt)) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
         return 0;
+    }
+
+    /*
+     * The current read record layer predates the CID.  In DTLS 1.3 it reads
+     * ahead the records of the next epoch, which carry this CID if the peer
+     * accepts it (RFC 9147 section 9.1), and has to find where they end.
+     */
+    if (s->ext.dtls_cid.sent_len != 0 && s->rlayer.rrlmethod != NULL
+        && s->rlayer.rrlmethod->set_options != NULL
+        && s->rlayer.rrl != NULL) {
+        params[0] = OSSL_PARAM_construct_octet_string(OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID,
+            s->ext.dtls_cid.sent, s->ext.dtls_cid.sent_len);
+        params[1] = OSSL_PARAM_construct_end();
+        if (!s->rlayer.rrlmethod->set_options(s->rlayer.rrl, params)) {
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+            return 0;
+        }
     }
     return 1;
 }

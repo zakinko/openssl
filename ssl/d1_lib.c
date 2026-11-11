@@ -1385,16 +1385,45 @@ static int dtls_listener_assign_cid(DTLS_LISTENER *dl, SSL *ssl)
  * dl->mutex.
  */
 #define DTLS_TLS12_CID_OFFSET 11
+/* RFC 9147 section 4, Figure 3: the CID follows the unified header's first byte */
+#define DTLS13_CID_OFFSET 1
+/*
+ * Is |first| the first byte of a DTLS 1.3 unified header with the C bit?
+ * RFC 9147 section 4, Figure 3: 0 0 1 C S L E E.
+ */
+static int dtls13_unified_with_cid(unsigned char first)
+{
+    return (first & DTLS13_UNI_HDR_FIX_BITS_MASK) == DTLS13_UNI_HDR_FIX_BITS
+        && (first & DTLS13_UNI_HDR_CID_BIT) != 0;
+}
+
 static SSL *dtls_listener_find_by_cid(DTLS_LISTENER *dl, const DGRAM_URXE *urxe)
 {
     const unsigned char *data = ossl_dgram_urxe_data(urxe);
+    size_t off;
 
-    if (dl->cid_len == 0 || urxe->data_len < DTLS_TLS12_CID_OFFSET + dl->cid_len
-        || data[0] != SSL3_RT_TLS12_CID)
+    if (dl->cid_len == 0 || urxe->data_len == 0)
+        return NULL;
+    if (data[0] == SSL3_RT_TLS12_CID)
+        off = DTLS_TLS12_CID_OFFSET;
+    else if (dtls13_unified_with_cid(data[0]))
+        off = DTLS13_CID_OFFSET;
+    else
+        return NULL;
+    if (urxe->data_len < off + dl->cid_len)
         return NULL;
 
-    return ossl_dgram_cid_lookup_find(dl->cid_conns,
-        data + DTLS_TLS12_CID_OFFSET, dl->cid_len);
+    return ossl_dgram_cid_lookup_find(dl->cid_conns, data + off, dl->cid_len);
+}
+
+/* Does the datagram begin with a record that carries a CID? */
+static int dtls_urxe_has_cid(const DGRAM_URXE *urxe)
+{
+    const unsigned char *data = ossl_dgram_urxe_data(urxe);
+
+    return urxe->data_len > 0
+        && (data[0] == SSL3_RT_TLS12_CID
+            || dtls13_unified_with_cid(data[0]));
 }
 
 /*
@@ -1541,12 +1570,12 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
     ossl_crypto_mutex_lock(dl->mutex);
 
     /*
-     * A tls12_cid record goes to the connection its CID names, whatever
-     * address it came from: that is what the CID is for.  One naming no
+     * A record with a CID (tls12_cid, or a DTLS 1.3 unified header with the
+     * C bit) goes to the connection its CID names, whatever address it came
+     * from: that is what the CID is for.  One naming no
      * connection of ours is dropped; it cannot start a handshake.
      */
-    if (dl->cid_len != 0 && urxe->data_len > 0
-        && ossl_dgram_urxe_data(urxe)[0] == SSL3_RT_TLS12_CID) {
+    if (dl->cid_len != 0 && dtls_urxe_has_cid(urxe)) {
         conn_ssl = dtls_listener_find_by_cid(dl, urxe);
         if (conn_ssl == NULL)
             goto release;

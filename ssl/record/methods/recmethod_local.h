@@ -339,6 +339,14 @@ struct ossl_record_layer_st {
      */
     unsigned char *cid;
     size_t cid_len;
+    /*
+     * A read record layer made before the CID was negotiated (DTLS 1.3
+     * epoch 0) gets the CID we sent here, only to find the end of the
+     * records of later epochs that it keeps for the next record layer
+     * (see dtls_get_more_records()).  Nothing is decrypted with it.
+     */
+    unsigned char *frame_cid;
+    size_t frame_cid_len;
     unsigned char cid_iv[EVP_MAX_IV_LENGTH];
     size_t cid_ivlen;
 
