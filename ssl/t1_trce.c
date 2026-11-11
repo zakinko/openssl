@@ -78,6 +78,7 @@ static const ssl_trace_tbl ssl_content_tbl[] = {
     { SSL3_RT_ALERT, "Alert" },
     { SSL3_RT_HANDSHAKE, "Handshake" },
     { SSL3_RT_APPLICATION_DATA, "ApplicationData" },
+    { SSL3_RT_TLS12_CID, "tls12_cid" },
 };
 
 /* Handshake types, sorted by ascending id  */

@@ -857,6 +857,13 @@ void SSL_CTX_get0_alpn_protos(SSL_CTX *ctx, const unsigned char **protos,
     unsigned int *protos_len);
 void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
     unsigned int *protos_len);
+/**
+ * @def SSL_DTLS_CID_MAX_LEN
+ * The longest DTLS Connection ID, from opaque cid<0..2^8-1> (RFC 9146
+ * section 3).
+ */
+#define SSL_DTLS_CID_MAX_LEN 255
+
 
 #ifndef OPENSSL_NO_PSK
 /*
