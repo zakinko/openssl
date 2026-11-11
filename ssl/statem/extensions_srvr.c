@@ -555,6 +555,22 @@ int tls_parse_ctos_etm(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
 }
 
 /*
+ * A "connection_id" extension in the ClientHello names the CID the client
+ * wants to receive (RFC 9146 section 3).  It is only remembered here; whether
+ * it is accepted is decided in tls_construct_stoc_connection_id(), once the
+ * cipher and Encrypt-then-MAC are known.
+ */
+int tls_parse_ctos_connection_id(SSL_CONNECTION *s, PACKET *pkt,
+    unsigned int context,
+    X509 *x, size_t chainidx)
+{
+    if (!s->ext.dtls_cid.enabled)
+        return 1;
+
+    return tls_dtls_cid_parse(s, pkt);
+}
+
+/*
  * Process a psk_kex_modes extension received in the ClientHello. |pkt| contains
  * the raw PACKET data for the extension. Returns 1 on success or 0 on failure.
  */
@@ -2013,6 +2029,29 @@ EXT_RETURN tls_construct_stoc_etm(SSL_CONNECTION *s, WPACKET *pkt,
         return EXT_RETURN_FAIL;
     }
 
+    return EXT_RETURN_SENT;
+}
+
+/*
+ * RFC 9146 section 3: "A server willing to use CIDs will respond with a
+ * "connection_id" extension in the ServerHello, containing the CID it wishes
+ * the client to use when sending messages towards it."  Not responding is how
+ * the server declines.
+ */
+EXT_RETURN tls_construct_stoc_connection_id(SSL_CONNECTION *s, WPACKET *pkt,
+    unsigned int context,
+    X509 *x, size_t chainidx)
+{
+    if (!s->ext.dtls_cid.enabled || !s->ext.dtls_cid.received
+        || !tls_dtls_cid_record_protection_ok(s))
+        return EXT_RETURN_NOT_SENT;
+
+    if (!tls_dtls_cid_construct(s, pkt)) {
+        /* SSLfatal() already called */
+        return EXT_RETURN_FAIL;
+    }
+
+    s->ext.dtls_cid.negotiated = 1;
     return EXT_RETURN_SENT;
 }
 

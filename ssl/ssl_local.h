@@ -742,6 +742,7 @@ typedef enum tlsext_index_en {
     TLSEXT_IDX_application_layer_protocol_negotiation,
     TLSEXT_IDX_use_srtp,
     TLSEXT_IDX_encrypt_then_mac,
+    TLSEXT_IDX_connection_id,
     TLSEXT_IDX_signed_certificate_timestamp,
     TLSEXT_IDX_extended_master_secret,
     TLSEXT_IDX_signature_algorithms_cert,
@@ -1886,6 +1887,31 @@ struct ssl_connection_st {
 
         /* Set to one if we have negotiated ETM */
         bool use_etm;
+
+        /*
+         * DTLS 1.2 Connection ID (RFC 9146).  Each side names in the
+         * "connection_id" extension the CID it wants to receive (section 3),
+         * so |own| goes out in our extension and is expected in records we
+         * read, and |peer| comes from the peer's extension and is put in
+         * records we write.  A zero length means no CID in that direction.
+         * The extension is negotiated afresh on every handshake (section 3),
+         * so |received|, |negotiated| and |peer| are reset by
+         * init_connection_id().
+         * |sent| is the copy of |own| that went out in this handshake: the
+         * application may change |own| for the next handshake while |sent|
+         * is still the one the record layer expects.
+         */
+        struct {
+            bool enabled;
+            unsigned char *own;
+            size_t own_len;
+            bool received;
+            bool negotiated;
+            unsigned char *sent;
+            size_t sent_len;
+            unsigned char *peer;
+            size_t peer_len;
+        } dtls_cid;
 
         /* Is the session perhaps suitable for early data? */
         bool early_data_ok;

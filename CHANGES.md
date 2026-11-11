@@ -33,6 +33,13 @@ OpenSSL 4.2
 
 ### Changes between 4.1 and 4.2 [xx XXX xxxx]
 
+ * Added support for the DTLS 1.2 Connection ID ([RFC 9146]): the
+   "connection_id" extension and the tls12_cid record format, for AEAD
+   ciphers and for CBC ciphers with Encrypt-then-MAC.  See
+   `SSL_set1_dtls_cid(3)`.
+
+   *Showta Ishizaki*
+
  * Added `CRYPTO_new_ex_data_ex()`, an `OSSL_LIB_CTX`-aware variant of
    `CRYPTO_new_ex_data()`.
 
@@ -24693,6 +24700,7 @@ ndif
 [RFC 8701]: https://datatracker.ietf.org/doc/html/rfc8701
 [RFC 8998]: https://datatracker.ietf.org/doc/html/rfc8998#name-iana-considerations
 [RFC 9000]: https://datatracker.ietf.org/doc/html/rfc9000
+[RFC 9146]: https://datatracker.ietf.org/doc/html/rfc9146
 [RFC 9147]: https://datatracker.ietf.org/doc/html/rfc9147
 [RFC 9149]: https://datatracker.ietf.org/doc/html/rfc9149
 [RFC 9846]: https://datatracker.ietf.org/doc/html/rfc9846

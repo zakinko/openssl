@@ -1278,6 +1278,24 @@ int tls_int_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
                     ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
                     goto err;
                 }
+            } else if (strcmp(p->key,
+                           OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID)
+                == 0) {
+                void *cid = NULL;
+
+                /*
+                 * RFC 9146 section 4: a tls12_cid record's "CID field is
+                 * present and contains one or more bytes", at most 2^8-1
+                 * (section 3).  A zero length CID is never passed here.
+                 */
+                if (!OSSL_PARAM_get_octet_string(p, &cid, 0, &rl->cid_len)
+                    || rl->cid_len == 0 || rl->cid_len > SSL_DTLS_CID_MAX_LEN) {
+                    OPENSSL_free(cid);
+                    rl->cid_len = 0;
+                    ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
+                    goto err;
+                }
+                rl->cid = cid;
             } else {
                 ERR_raise(ERR_LIB_SSL, SSL_R_UNKNOWN_MANDATORY_PARAMETER);
                 goto err;
@@ -1445,6 +1463,8 @@ static void tls_int_free(OSSL_RECORD_LAYER *rl)
 #endif
     OPENSSL_free(rl->iv);
     OPENSSL_free(rl->nonce);
+    OPENSSL_free(rl->cid);
+    OPENSSL_cleanse(rl->cid_iv, sizeof(rl->cid_iv));
 
     TLS_RL_RECORD_release(rl->rrec, SSL_MAX_PIPELINES);
 
@@ -1720,7 +1740,7 @@ int tls_post_encryption_processing_default(OSSL_RECORD_LAYER *rl,
     recordstart += tls_get_record_body_alignment_offset(rl, recordstart);
 
     if (rl->isdtls)
-        rechdrlen = dtls_get_rec_header_size(*recordstart);
+        rechdrlen = dtls_get_rec_header_size(rl, *recordstart);
     else
         rechdrlen = SSL3_RT_HEADER_LENGTH;
 
@@ -1742,7 +1762,8 @@ int tls_post_encryption_processing_default(OSSL_RECORD_LAYER *rl,
         rl->msg_callback(1, thiswr->rec_version, SSL3_RT_HEADER, recordstart,
             rechdrlen, rl->cbarg);
 
-        if (rl->version == version1_3 && rl->enc_ctx != NULL) {
+        if ((rl->version == version1_3 || rl->cid_len != 0)
+            && rl->enc_ctx != NULL) {
             unsigned char ctype = thistempl->type;
 
             rl->msg_callback(1, thiswr->rec_version, SSL3_RT_INNER_CONTENT_TYPE,
