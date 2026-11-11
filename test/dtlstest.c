@@ -3142,7 +3142,7 @@ static int test_dtls_cid_discard(int idx)
          * Make the server expect the tampered CID, so that the record gets
          * past the lookup and fails on the MAC, which covers the CID.
          */
-        OSSL_RECORD_LAYER *rl = SSL_CONNECTION_FROM_SSL(sssl)->rlayer.rrl;
+        OSSL_RECORD_LAYER *rl = SSL_CONNECTION_FROM_SSL_ONLY(sssl)->rlayer.rrl;
 
         if (!TEST_ptr(rl) || !TEST_size_t_eq(rl->cid_len, sizeof(cid_server)))
             goto end;
@@ -3155,7 +3155,7 @@ static int test_dtls_cid_discard(int idx)
         || !TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_WANT_READ))
         goto end;
     if (idx == 4)
-        SSL_CONNECTION_FROM_SSL(sssl)->rlayer.rrl->cid[0] ^= 0x01;
+        SSL_CONNECTION_FROM_SSL_ONLY(sssl)->rlayer.rrl->cid[0] ^= 0x01;
 
     /* The genuine record still gets through */
     BIO_ctrl(c2s, MEMPACKET_CTRL_SET_CID_LEN, sizeof(cid_server), NULL);
