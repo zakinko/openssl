@@ -8515,10 +8515,14 @@ static uint16_t conn_peer_port(SSL *ssl)
 
 /*
  *   0: the client stays put
- *   1: the client moves; the callback says no, so the address stays
- *   2: the client moves; the callback says yes, so the address moves
+ *   1: the client moves; no RRC, the callback says no, so the address stays
+ *   2: the client moves; no RRC, the callback says yes, so the address moves
  *   3: the listener gives no CIDs; the extension is not negotiated
  *   4: an application cannot replace the CID the listener chose
+ *   5: the client moves; the Return Routability Check (RFC 9853) succeeds
+ *      and the address moves, without asking the callback
+ *   6: the client moves; the check times out (section 5.1, "If T expires,
+ *      the peer address binding is not updated")
  */
 static int test_dtls12_listener_cid(int idx)
 {
@@ -8548,7 +8552,13 @@ static int test_dtls12_listener_cid(int idx)
         || (idx != 3
             && !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
                 SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN)))
-        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid))))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid)))
+        || ((idx == 1 || idx == 2)
+            && !TEST_true(SSL_set_dtls_rrc(clientssl, 0))))
+        goto end;
+    timeout_test_fake_time = ossl_time_now();
+    if (!TEST_true(ossl_dtls_listener_set_override_now_cb(listener,
+            timeout_test_now_cb, NULL)))
         goto end;
 
     SSL_set_connect_state(clientssl);
@@ -8596,7 +8606,11 @@ static int test_dtls12_listener_cid(int idx)
         goto end;
     }
 
-    if (idx == 1 || idx == 2) {
+    if (!TEST_int_eq(SSL_get_dtls_rrc(serverssl), idx != 1 && idx != 2)
+        || !TEST_int_eq(SSL_get_dtls_rrc(clientssl), idx != 1 && idx != 2))
+        goto end;
+
+    if (idx == 1 || idx == 2 || idx == 5 || idx == 6) {
         /* A NAT rebinding: the client's datagrams now come from port 23456 */
         ina.s_addr = htonl(INADDR_LOOPBACK);
         if (!TEST_ptr(moved = BIO_ADDR_new())
@@ -8629,6 +8643,30 @@ static int test_dtls12_listener_cid(int idx)
     case 2:
         if (!TEST_int_eq(peer_change_calls, 1)
             || !TEST_int_eq(conn_peer_port(serverssl), 23456))
+            goto end;
+        break;
+    case 5:
+    case 6:
+        /*
+         * The server has sent a path_challenge to the new address and still
+         * sends to the old one; the callback is not asked.
+         */
+        if (!TEST_int_eq(peer_change_calls, 0)
+            || !TEST_int_eq(conn_peer_port(serverssl), 12345)
+            || !TEST_true(SSL_get0_dtls_cid(serverssl, NULL, NULL, NULL, NULL))
+            || !TEST_true(SSL_get_dtls_rrc(serverssl)))
+            goto end;
+        if (idx == 6)
+            timeout_test_fake_time = ossl_time_add(timeout_test_fake_time,
+                ossl_ms2time(2000));
+        /* The client answers the challenge while waiting for data */
+        if (!TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ)
+            /* and the server takes the path_response */
+            || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+            || !TEST_int_eq(conn_peer_port(serverssl), idx == 5 ? 23456 : 12345)
+            || !TEST_int_eq(peer_change_calls, 0))
             goto end;
         break;
     }
@@ -8821,7 +8859,7 @@ int setup_tests(void)
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_TEST(test_dtls12_listener_alert_after_hvr_frees_pending);
 #ifndef OPENSSL_NO_DTLS1_2
-    ADD_ALL_TESTS(test_dtls12_listener_cid, 5);
+    ADD_ALL_TESTS(test_dtls12_listener_cid, 7);
 #endif
 #endif
 
