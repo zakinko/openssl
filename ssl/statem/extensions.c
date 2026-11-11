@@ -1621,6 +1621,7 @@ static int init_connection_id(SSL_CONNECTION *s, unsigned int context)
     s->ext.dtls_cid.spares_num = 0;
     s->ext.dtls_cid.ncid_pending = 0;
     s->ext.dtls_cid.rcid_num = 0;
+    s->ext.dtls_cid.rcid_unfulfilled = 0;
     OPENSSL_free(s->ext.dtls_cid.peer);
     s->ext.dtls_cid.peer = NULL;
     s->ext.dtls_cid.peer_len = 0;

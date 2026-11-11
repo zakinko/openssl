@@ -4367,9 +4367,13 @@ int SSL_dtls_request_connection_id(SSL *s, unsigned int num)
 
     if (sc == NULL)
         return 0;
-    /* RFC 9147 section 9: "uint8 num_cids", not "when sending an empty CID" */
+    /*
+     * RFC 9147 section 9: "uint8 num_cids", not "when sending an empty CID",
+     * and "Endpoints MUST NOT send a RequestConnectionId message when an
+     * existing request is still unfulfilled".
+     */
     if (sc->ext.dtls_cid.peer_len == 0 || sc->ext.dtls_cid.rcid_num != 0
-        || num == 0 || num > 255) {
+        || sc->ext.dtls_cid.rcid_unfulfilled || num == 0 || num > 255) {
         ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
         return 0;
     }

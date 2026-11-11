@@ -863,6 +863,7 @@ CON_FUNC_RETURN tls_construct_request_connection_id(SSL_CONNECTION *s,
         return CON_FUNC_ERROR;
     }
     s->ext.dtls_cid.rcid_num = 0;
+    s->ext.dtls_cid.rcid_unfulfilled = 1;
     return CON_FUNC_SUCCESS;
 }
 
@@ -946,6 +947,12 @@ MSG_PROCESS_RETURN tls_process_new_connection_id(SSL_CONNECTION *s,
         }
         first = 0;
     }
+    /*
+     * The answer to a RequestConnectionId is a NewConnectionId with
+     * "cid_spare" (section 9), which may hold fewer CIDs or none.
+     */
+    if (usage == SSL_DTLS_CID_SPARE)
+        s->ext.dtls_cid.rcid_unfulfilled = 0;
 
     return MSG_PROCESS_FINISHED_READING;
 }

@@ -1941,7 +1941,8 @@ struct ssl_connection_st {
              * the peer's spare CIDs, kept until used; "Implementations
              * which receive more spare CIDs than they wish to maintain MAY
              * simply discard any extra CIDs."  |ncid_pending| and
-             * |rcid_num| are messages waiting to be sent.
+             * |rcid_num| are messages waiting to be sent; |rcid_unfulfilled|
+             * is a RequestConnectionId sent and not yet answered.
              */
             unsigned char *own_more;
             size_t own_more_num;
@@ -1954,6 +1955,7 @@ struct ssl_connection_st {
             int ncid_usage;
             size_t ncid_num;
             unsigned int rcid_num;
+            bool rcid_unfulfilled;
         } dtls_cid;
 
         /* Is the session perhaps suitable for early data? */
@@ -2296,6 +2298,14 @@ static ossl_inline int dtls_msg_needs_ack(int sentbyserver, unsigned char msgtyp
     switch (msgtype) {
     case SSL3_MT_NEWSESSION_TICKET:
     case SSL3_MT_KEY_UPDATE:
+    /*
+     * RFC 9147 section 5.8.4 lists NewConnectionId and
+     * RequestConnectionId among the post-handshake messages, and section
+     * 7: "For post-handshake messages, ACKs SHOULD be sent once for
+     * each received and processed handshake record".
+     */
+    case SSL3_MT_NEW_CONNECTION_ID:
+    case SSL3_MT_REQUEST_CONNECTION_ID:
         return 1;
 
     case SSL3_MT_CERTIFICATE:

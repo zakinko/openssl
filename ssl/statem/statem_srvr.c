@@ -857,6 +857,13 @@ static WRITE_TRAN ossl_statem_server13_write_transition(SSL_CONNECTION *s)
             st->ack_for_retransmit = 0;
             return WRITE_TRAN_FINISHED;
         }
+        /*
+         * RFC 9147 section 9: "Endpoints SHOULD respond to
+         * RequestConnectionId by sending a NewConnectionId ... as soon as
+         * possible."  TLS_ST_OK would end the handshake first.
+         */
+        if (st->hand_state == TLS_ST_OK && s->ext.dtls_cid.ncid_pending)
+            st->hand_state = TLS_ST_SW_NEW_CONNECTION_ID;
 
         return WRITE_TRAN_CONTINUE;
     }

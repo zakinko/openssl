@@ -3420,6 +3420,8 @@ static int test_dtls13_cid_update(int idx)
     case 1:
         if (!TEST_true(SSL_dtls_request_connection_id(sssl, 2))
             || !cid_settle(sssl, cssl)
+            /* Answered, so another may be made */
+            || !TEST_false(ssc->ext.dtls_cid.rcid_unfulfilled)
             || !TEST_size_t_eq(ssc->ext.dtls_cid.spares_num, 2)
             || !TEST_size_t_eq(csc->ext.dtls_cid.own_more_num, 2)
             || !TEST_mem_eq(ssc->ext.dtls_cid.spares[0].cid,
