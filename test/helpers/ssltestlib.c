@@ -314,6 +314,7 @@ typedef struct mempacket_test_ctx_st {
     unsigned int dropepoch;
     int droprec;
     int duprec;
+    size_t cidlen;
 } MEMPACKET_TEST_CTX;
 
 static int mempacket_test_new(BIO *bi);
@@ -409,6 +410,9 @@ static int mempacket_test_read(BIO *bio, char *out, int outl)
 
             if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(*rec))
                 rechdrlen = DTLS13_UNI_HDR_FIXED_LENGTH;
+            else if (*rec == SSL3_RT_TLS12_CID && ctx->cidlen != 0)
+                /* RFC 9146 section 4, Figure 3: the CID before the length */
+                rechdrlen = DTLS1_RT_HEADER_LENGTH + (unsigned int)ctx->cidlen;
             else
                 rechdrlen = DTLS1_RT_HEADER_LENGTH;
 
@@ -439,7 +443,7 @@ static int mempacket_test_read(BIO *bio, char *out, int outl)
                 len = (rec[DTLS13_UNI_HDR_RECORD_LEN_HI] << 8)
                     | rec[DTLS13_UNI_HDR_RECORD_LEN_LO];
             else
-                len = (rec[RECORD_LEN_HI] << 8) | rec[RECORD_LEN_LO];
+                len = (rec[rechdrlen - 2] << 8) | rec[rechdrlen - 1];
 
             len += rechdrlen;
 
@@ -921,6 +925,13 @@ int mempacket_test_inject(BIO *bio, const char *in, int inl, int pktnum,
             /* We assert that inl is the correct record length */
             len = inl;
         }
+    } else if (*in == SSL3_RT_TLS12_CID && ctx != NULL && ctx->cidlen != 0) {
+        /* RFC 9146 section 4, Figure 3: the CID before the length */
+        if ((size_t)inl < DTLS1_RT_HEADER_LENGTH + ctx->cidlen)
+            return -1;
+        len = ((inu[RECORD_LEN_HI + ctx->cidlen] << 8)
+            | inu[RECORD_LEN_LO + ctx->cidlen]);
+        len += DTLS1_RT_HEADER_LENGTH + ctx->cidlen;
     } else {
         len = ((inu[RECORD_LEN_HI] << 8) | inu[RECORD_LEN_LO]);
         len += DTLS1_RT_HEADER_LENGTH;
@@ -1074,6 +1085,9 @@ static long mempacket_test_ctrl(BIO *bio, int cmd, long num, void *ptr)
         break;
     case MEMPACKET_CTRL_SET_DUPLICATE_REC:
         ctx->duprec = (int)num;
+        break;
+    case MEMPACKET_CTRL_SET_CID_LEN:
+        ctx->cidlen = (size_t)num;
         break;
     case BIO_CTRL_DGRAM_QUERY_MTU:
         ret = 1500;
