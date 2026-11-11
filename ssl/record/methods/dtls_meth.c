@@ -523,6 +523,7 @@ int dtls_get_more_records(OSSL_RECORD_LAYER *rl)
     unsigned char recseqnum[6];
     size_t recseqnumlen = 0;
     size_t rechdrlen = 0;
+    size_t bodyoff;
     size_t recseqnumoffs = 0;
     int buffered_record = 0;
     OSSL_RECORD_LAYER *crypto_rl;
@@ -836,11 +837,11 @@ again:
      * by the CID; measure what of the body is already in rl->packet from the
      * real end of the header, which rl->packet[0] gives again on re-entry.
      */
-    if (rr->length > rl->packet_length
-            - (rl->packet[0] == SSL3_RT_TLS12_CID
-                    && rl->version != DTLS1_3_VERSION && rl->cid_len != 0
-                ? dtls_get_rec_header_size(rl, rl->packet[0])
-                : DTLS1_RT_HEADER_LENGTH)) {
+    bodyoff = DTLS1_RT_HEADER_LENGTH;
+    if (rl->packet[0] == SSL3_RT_TLS12_CID && rl->version != DTLS1_3_VERSION
+        && rl->cid_len != 0)
+        bodyoff = dtls_get_rec_header_size(rl, rl->packet[0]);
+    if (rr->length > rl->packet_length - bodyoff) {
         /* now rl->packet_length == DTLS1_RT_HEADER_LENGTH */
         more = rr->length - (nread - rechdrlen);
         rret = rl->funcs->read_n(rl, more, more, 1, 1, &nread);

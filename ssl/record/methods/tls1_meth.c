@@ -198,9 +198,12 @@ static int tls1_set_crypto_state(OSSL_RECORD_LAYER *rl, int level,
              * section 3) and CCM (RFC 6655 section 3), the 12 byte write IV
              * for ChaCha20-Poly1305 (RFC 7905 section 2).
              */
-            size_t want = (mode == EVP_CIPH_GCM_MODE || mode == EVP_CIPH_CCM_MODE)
-                ? EVP_GCM_TLS_FIXED_IV_LEN
-                : DTLS_CID_CHACHA_IV_LEN;
+            size_t want = DTLS_CID_CHACHA_IV_LEN;
+
+            if (mode == EVP_CIPH_GCM_MODE)
+                want = EVP_GCM_TLS_FIXED_IV_LEN;
+            else if (mode == EVP_CIPH_CCM_MODE)
+                want = EVP_CCM_TLS_FIXED_IV_LEN;
 
             if (ivlen != want || ivlen > sizeof(rl->cid_iv)) {
                 ERR_raise(ERR_LIB_SSL, ERR_R_INTERNAL_ERROR);
@@ -346,9 +349,15 @@ static int dtls_cid_aead_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec,
          * for any fixed key"; it "MAY be the 64-bit sequence number", which
          * is distinct within an epoch, whose keys are its own.
          */
-        if (!ossl_assert(rl->eivlen == sizeof(seq64)
-                && rl->cid_ivlen + rl->eivlen == EVP_GCM_TLS_FIXED_IV_LEN
-                        + EVP_GCM_TLS_EXPLICIT_IV_LEN)) {
+        size_t fixedlen = mode == EVP_CIPH_GCM_MODE ? EVP_GCM_TLS_FIXED_IV_LEN
+                                                    : EVP_CCM_TLS_FIXED_IV_LEN;
+        size_t explicitlen = mode == EVP_CIPH_GCM_MODE
+            ? EVP_GCM_TLS_EXPLICIT_IV_LEN
+            : EVP_CCM_TLS_EXPLICIT_IV_LEN;
+
+        if (!ossl_assert(rl->eivlen == explicitlen
+                && rl->eivlen == sizeof(seq64)
+                && rl->cid_ivlen == fixedlen)) {
             RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
             return 0;
         }
