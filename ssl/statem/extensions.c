@@ -1707,15 +1707,30 @@ int tls_dtls_cid_construct(SSL_CONNECTION *s, WPACKET *pkt)
 /*
  * RFC 9146 section 5 changes the MAC input for block ciphers with and without
  * Encrypt-then-MAC (5.1, 5.2) and the additional data for AEAD ciphers (5.3).
- * Sections 5.2 and 5.3 are implemented.  Section 5.1 is not: the receiving
- * side of a MAC-then-encrypt record has to compute the MAC in constant time
- * (Lucky 13), and the code that does so, ssl3_cbc_digest_record() through the
- * "tls-data-size" parameter of the HMAC provider, takes a fixed 13 byte
- * header.  The RFC lets a server decline the extension (section 3, "A server
- * willing to use CIDs will respond"), so the extension is only used with a
- * record protection for which it is implemented.  This is a choice of this
- * implementation, not a requirement of RFC 9146.
+ * The receiving side of a MAC-then-encrypt record (5.1) has to compute the
+ * MAC in constant time (Lucky 13), which ssl3_cbc_digest_record() does
+ * through the "tls-data-size" parameter of the HMAC provider; with a CID the
+ * header before the data is longer than TLS's 13 bytes, and the provider has
+ * to be told so with "tls-header-size".  A provider without that parameter,
+ * such as an older FIPS module, cannot, and the extension is then not used
+ * with MAC-then-encrypt: the RFC lets a server decline it (section 3, "A
+ * server willing to use CIDs will respond").  Declining then is a choice of
+ * this implementation, not a requirement of RFC 9146.
  */
+static int dtls_cid_hmac_takes_header_size(const SSL_CONNECTION *s)
+{
+    SSL_CTX *ctx = SSL_CONNECTION_GET_CTX(s);
+    EVP_MAC *mac = EVP_MAC_fetch(ctx->libctx, "HMAC", ctx->propq);
+    int ok;
+
+    ok = mac != NULL
+        && OSSL_PARAM_locate_const(EVP_MAC_settable_ctx_params(mac),
+               OSSL_MAC_PARAM_TLS_HEADER_SIZE)
+            != NULL;
+    EVP_MAC_free(mac);
+    return ok;
+}
+
 int tls_dtls_cid_record_protection_ok(const SSL_CONNECTION *s)
 {
     const SSL_CIPHER *c = s->s3.tmp.new_cipher;
@@ -1728,6 +1743,10 @@ int tls_dtls_cid_record_protection_ok(const SSL_CONNECTION *s)
     /* CBC with Encrypt-then-MAC (RFC 7366): RFC 9146 section 5.2 */
     if (s->ext.use_etm)
         return 1;
+    /* CBC with HMAC, MAC-then-encrypt: RFC 9146 section 5.1 */
+    if (c->algorithm_mac == SSL_SHA1 || c->algorithm_mac == SSL_SHA256
+        || c->algorithm_mac == SSL_SHA384)
+        return dtls_cid_hmac_takes_header_size(s);
     return 0;
 }
 

@@ -22,5 +22,6 @@ use OpenSSL::paramnames qw(produce_param_decoder);
                           ['OSSL_MAC_PARAM_PROPERTIES',     'propq',   'utf8_string'],
                           ['OSSL_MAC_PARAM_KEY',            'key',     'octet_string'],
                           ['OSSL_MAC_PARAM_TLS_DATA_SIZE',  'tlssize', 'size_t'],
+                          ['OSSL_MAC_PARAM_TLS_HEADER_SIZE', 'tlshdr', 'size_t'],
                           ['OSSL_MAC_PARAM_FIPS_KEY_CHECK', 'ind_k',   'int', 'fips'],
                          )); -}
