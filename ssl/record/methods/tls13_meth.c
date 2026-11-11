@@ -235,7 +235,7 @@ static int tls13_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *recs,
      */
     if (isdtls
         && !ossl_assert(!DTLS13_UNI_HDR_CID_BIT_IS_SET(rec->type)
-            || rl->cid_len != 0)) {
+            || (rl->cid_len != 0 && (sending || rec->cid != NULL)))) {
         RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
         return 0;
     }
@@ -246,9 +246,12 @@ static int tls13_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *recs,
          * RFC 9147 section 4: "The entire header value shown in Figure 4
          * (but prior to record number encryption ...) is used as the
          * additional data value for the AEAD function", the CID with it.
+         * A received record may carry any of the CIDs we gave out
+         * (section 9), so it is the one in its header.
          */
         || (isdtls && DTLS13_UNI_HDR_CID_BIT_IS_SET(rec->type)
-            && !WPACKET_memcpy(&wpkt, rl->cid, rl->cid_len))
+            && !WPACKET_memcpy(&wpkt, sending ? rl->cid : rec->cid,
+                rl->cid_len))
         || (isdtls
             && (sbit ? !WPACKET_put_bytes_u16(&wpkt, seqnum)
                      : !WPACKET_put_bytes_u8(&wpkt, seqnum)))

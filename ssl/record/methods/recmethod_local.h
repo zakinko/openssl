@@ -74,6 +74,12 @@ typedef struct tls_rl_record_st {
     /* sequence number, needed by DTLS1 */
     /* r */
     uint64_t seq_num;
+    /*
+     * The CID a received DTLS 1.3 record carried, pointing into the record
+     * layer's |cid| or |cid_more|; NULL when it had none
+     */
+    /* r */
+    const unsigned char *cid;
 } TLS_RL_RECORD;
 
 /* Macros/functions provided by the TLS_RL_RECORD component */
@@ -347,6 +353,14 @@ struct ossl_record_layer_st {
      */
     unsigned char *frame_cid;
     size_t frame_cid_len;
+    /*
+     * Further CIDs of our own that a read record layer accepts, each
+     * |cid_len| bytes, |cid_more_num| of them: DTLS 1.3 lets the peer use
+     * any CID we gave it in a NewConnectionId message (RFC 9147 section 9,
+     * "either an existing or new CID MAY be used").
+     */
+    unsigned char *cid_more;
+    size_t cid_more_num;
     unsigned char cid_iv[EVP_MAX_IV_LENGTH];
     size_t cid_ivlen;
 
@@ -535,6 +549,16 @@ int dtls_cid_add_record_padding(OSSL_RECORD_LAYER *rl,
  * @returns 1 on success, 0 on error (RLAYERfatal() called)
  */
 int dtls_cid_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec);
+
+/**
+ * @brief Is @p cid, of the record layer's CID length, one of the CIDs a read
+ * record layer accepts?
+ * @param rl the read record layer
+ * @param cid the CID in a record
+ * @returns the CID of ours it matches, or NULL if none does
+ */
+const unsigned char *dtls_cid_is_ours(const OSSL_RECORD_LAYER *rl,
+    const unsigned char *cid);
 int dtls_crypt_sequence_number(EVP_CIPHER_CTX *ctx, unsigned char *seq, size_t seqlen,
     unsigned char *rec_data);
 int dtls_get_more_records(OSSL_RECORD_LAYER *rl);

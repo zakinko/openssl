@@ -504,6 +504,19 @@ static int dtls13_plaintext_allows_type(const OSSL_RECORD_LAYER *rl, int type)
  * ssl->s3.rrec.data    - data
  * ssl->s3.rrec.length  - number of bytes
  */
+const unsigned char *dtls_cid_is_ours(const OSSL_RECORD_LAYER *rl,
+    const unsigned char *cid)
+{
+    size_t i;
+
+    if (memcmp(cid, rl->cid, rl->cid_len) == 0)
+        return rl->cid;
+    for (i = 0; i < rl->cid_more_num; i++)
+        if (memcmp(cid, rl->cid_more + i * rl->cid_len, rl->cid_len) == 0)
+            return rl->cid_more + i * rl->cid_len;
+    return NULL;
+}
+
 /*
  * Drop the rest of the datagram the current record came from.  A record whose
  * length cannot be found also leaves the place of the next record unknown, so
@@ -690,9 +703,11 @@ again:
                     }
                 }
                 if (!PACKET_get_sub_packet(&dtlsrecord, &cid, cidlen)
-                    || memcmp(PACKET_data(&cid),
-                           rl->cid_len != 0 ? rl->cid : rl->frame_cid, cidlen)
-                        != 0) {
+                    || (rl->cid_len != 0
+                            ? (rr->cid = dtls_cid_is_ours(rl,
+                                   PACKET_data(&cid))) == NULL
+                            : memcmp(PACKET_data(&cid), rl->frame_cid, cidlen)
+                                != 0)) {
                     dtls_discard_datagram(rl);
                     rr->length = 0;
                     goto again;
@@ -805,7 +820,7 @@ again:
              * invalid here (RFC 6347 section 4.1.2.7).  The CID is not
              * secret, so the comparison need not be constant time.
              */
-            if (memcmp(PACKET_data(&cid), rl->cid, rl->cid_len) != 0) {
+            if (dtls_cid_is_ours(rl, PACKET_data(&cid)) == NULL) {
                 rr->length = 0;
                 rl->packet_length = 0;
                 goto again;

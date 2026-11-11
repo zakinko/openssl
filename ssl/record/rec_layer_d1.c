@@ -379,6 +379,7 @@ start:
             && (current_state == TLS_ST_CW_FINISHED
                 || current_state == TLS_ST_CW_KEY_UPDATE
                 || current_state == TLS_ST_SW_KEY_UPDATE
+                || ossl_statem_is_cid_update_write(current_state)
                 || current_state == TLS_ST_SW_SESSION_TICKET
                 || (current_state == TLS_ST_OK && SSL_in_init(s)))
             && rr->type == SSL3_RT_APPLICATION_DATA)) {

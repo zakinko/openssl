@@ -1675,6 +1675,7 @@ void ossl_ssl_connection_free(SSL *ssl)
     OPENSSL_free(s->ext.dtls_cid.own);
     OPENSSL_free(s->ext.dtls_cid.peer);
     OPENSSL_free(s->ext.dtls_cid.sent);
+    OPENSSL_free(s->ext.dtls_cid.own_more);
     OPENSSL_free(s->ext.tls13_cookie);
     if (s->clienthello != NULL)
         OPENSSL_free(s->clienthello->pre_proc_exts);
@@ -4298,6 +4299,83 @@ int SSL_get_dtls_rrc(const SSL *s)
     const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
 
     return sc != NULL && sc->ext.dtls_cid.rrc_negotiated;
+}
+
+/*
+ * Checks common to the two DTLS 1.3 CID update messages: a DTLS 1.3
+ * connection past its handshake, with the CID negotiated, and no message of
+ * the same kind waiting ("implementations MUST NOT send KeyUpdate,
+ * NewConnectionId, or RequestConnectionId messages if an earlier message of
+ * the same type has not yet been acknowledged", RFC 9147 section 5.8.4).
+ */
+static SSL_CONNECTION *dtls_cid_update_conn(SSL *s)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+
+    if (sc == NULL || !SSL_CONNECTION_IS_DTLS13(sc)) {
+        ERR_raise(ERR_LIB_SSL, SSL_R_WRONG_SSL_VERSION);
+        return NULL;
+    }
+    if (!SSL_is_init_finished(s)) {
+        ERR_raise(ERR_LIB_SSL, SSL_R_STILL_IN_INIT);
+        return NULL;
+    }
+    if (!sc->ext.dtls_cid.negotiated) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
+        return NULL;
+    }
+    return sc;
+}
+
+/*
+ * Have a NewConnectionId or RequestConnectionId sent.  Only one flight of
+ * post-handshake messages is in the air at a time: while one still waits
+ * for its ACK (RFC 9147 section 7), the state machine sends the new message
+ * from TLS_ST_OK once that ACK has come.
+ */
+static void dtls_cid_update_kick(SSL_CONNECTION *sc)
+{
+    if (sc->statem.hand_state == TLS_ST_OK)
+        ossl_statem_set_in_init(sc, 1);
+}
+
+int SSL_dtls_new_connection_id(SSL *s, int usage)
+{
+    SSL_CONNECTION *sc = dtls_cid_update_conn(s);
+
+    if (sc == NULL)
+        return 0;
+    /*
+     * RFC 9147 section 9: not with "an empty CID" negotiated for receiving,
+     * and the usage is one of the two defined.
+     */
+    if (sc->ext.dtls_cid.sent_len == 0 || sc->ext.dtls_cid.ncid_pending
+        || (usage != SSL_DTLS_CID_IMMEDIATE && usage != SSL_DTLS_CID_SPARE)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    sc->ext.dtls_cid.ncid_pending = 1;
+    sc->ext.dtls_cid.ncid_usage = usage;
+    sc->ext.dtls_cid.ncid_num = 1;
+    dtls_cid_update_kick(sc);
+    return 1;
+}
+
+int SSL_dtls_request_connection_id(SSL *s, unsigned int num)
+{
+    SSL_CONNECTION *sc = dtls_cid_update_conn(s);
+
+    if (sc == NULL)
+        return 0;
+    /* RFC 9147 section 9: "uint8 num_cids", not "when sending an empty CID" */
+    if (sc->ext.dtls_cid.peer_len == 0 || sc->ext.dtls_cid.rcid_num != 0
+        || num == 0 || num > 255) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    sc->ext.dtls_cid.rcid_num = num;
+    dtls_cid_update_kick(sc);
+    return 1;
 }
 
 /*

@@ -3053,6 +3053,26 @@ void ossl_dtls_listener_unregister_conn_cid(SSL *s, SSL *conn)
     ossl_crypto_mutex_unlock(dl->mutex);
 }
 
+int ossl_dtls_listener_add_conn_cid(SSL *s, SSL *conn, const unsigned char *cid,
+    size_t cid_len)
+{
+    DTLS_LISTENER *dl;
+    int ok;
+
+    if (s == NULL || !IS_DTLS_LISTENER(s))
+        return 1;
+
+    dl = (DTLS_LISTENER *)s;
+
+    ossl_crypto_mutex_lock(dl->mutex);
+    ok = dl->cid_len == 0
+        || (cid_len == dl->cid_len
+            && ossl_dgram_cid_lookup_register(dl->cid_conns, cid, cid_len,
+                conn));
+    ossl_crypto_mutex_unlock(dl->mutex);
+    return ok;
+}
+
 /*
  * The CID length a listener gives its connections, 0 if none or if |s| is
  * not a DTLS listener.
