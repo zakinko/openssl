@@ -858,6 +858,13 @@ void SSL_CTX_get0_alpn_protos(SSL_CTX *ctx, const unsigned char **protos,
 void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
     unsigned int *protos_len);
 
+/* DTLS 1.2 Connection ID, RFC 9146 */
+#define SSL_DTLS_CID_MAX_LEN 255
+__owur int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len);
+void SSL_clear_dtls_cid(SSL *s);
+int SSL_get0_dtls_cid(const SSL *s, const unsigned char **own,
+    size_t *own_len, const unsigned char **peer, size_t *peer_len);
+
 #ifndef OPENSSL_NO_PSK
 /*
  * the maximum length of the buffer given to callbacks containing the
