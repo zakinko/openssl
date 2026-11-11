@@ -858,10 +858,43 @@ void SSL_CTX_get0_alpn_protos(SSL_CTX *ctx, const unsigned char **protos,
 void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
     unsigned int *protos_len);
 
-/* DTLS 1.2 Connection ID, RFC 9146 */
+/**
+ * @def SSL_DTLS_CID_MAX_LEN
+ * The longest DTLS Connection ID, from opaque cid<0..2^8-1> (RFC 9146
+ * section 3).
+ */
 #define SSL_DTLS_CID_MAX_LEN 255
+
+/**
+ * @brief Enable the DTLS 1.2 "connection_id" extension and set the CID to
+ * receive.
+ * @param s the DTLS connection
+ * @param cid the CID the peer is asked to use when sending, or NULL
+ * @param cid_len the length of @p cid, at most SSL_DTLS_CID_MAX_LEN; 0 for
+ * none
+ * @returns 1 on success, 0 on error
+ * @see SSL_set1_dtls_cid(3)
+ */
 __owur int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len);
+
+/**
+ * @brief Disable the DTLS 1.2 "connection_id" extension from the next
+ * handshake on.
+ * @param s the DTLS connection
+ * @see SSL_clear_dtls_cid(3)
+ */
 void SSL_clear_dtls_cid(SSL *s);
+
+/**
+ * @brief Get the Connection IDs negotiated in the last handshake.
+ * @param s the DTLS connection
+ * @param own set to the CID in the records @p s receives, may be NULL
+ * @param own_len set to the length of @p own, may be NULL
+ * @param peer set to the CID in the records @p s sends, may be NULL
+ * @param peer_len set to the length of @p peer, may be NULL
+ * @returns 1 if the extension was negotiated, 0 otherwise
+ * @see SSL_get0_dtls_cid(3)
+ */
 int SSL_get0_dtls_cid(const SSL *s, const unsigned char **own,
     size_t *own_len, const unsigned char **peer, size_t *peer_len);
 
