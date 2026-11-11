@@ -1323,9 +1323,6 @@ static void dtls_listener_connection_free(SSL *ssl)
     sc = SSL_CONNECTION_FROM_SSL(ssl);
 
     if (sc != NULL && sc->d1 != NULL) {
-        /* dtls1_free() will not see the listener to do this itself */
-        ossl_dtls_listener_unregister_conn_cid(sc->d1->listener, ssl);
-
         /*
          * Clear listener reference to prevent dtls1_free() from calling
          * SSL_free() on the listener. The connection does not own the listener
@@ -1334,6 +1331,19 @@ static void dtls_listener_connection_free(SSL *ssl)
         sc->d1->listener = NULL;
     }
     SSL_free(ssl);
+}
+
+/*
+ * Free a connection of the listener, taking it out of the CID table first, as
+ * the callers take it out of the pending and established tables.  The caller
+ * holds dl->mutex.  dtls1_free() does not do it: the listener reference is
+ * cleared before SSL_free(), so that the connection does not reach back into
+ * the listener.
+ */
+static void dtls_listener_conn_free_locked(DTLS_LISTENER *dl, SSL *ssl)
+{
+    ossl_dgram_cid_lookup_unregister_ssl(dl->cid_conns, ssl);
+    dtls_listener_connection_free(ssl);
 }
 
 /*
@@ -1488,7 +1498,7 @@ static SSL *dtls_listener_create_conn_ssl(DTLS_LISTENER *dl,
     return ssl;
 
 err:
-    dtls_listener_connection_free(ssl);
+    dtls_listener_conn_free_locked(dl, ssl);
     return NULL;
 }
 
@@ -1577,7 +1587,7 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
          * for this address.
          */
         if (!ossl_dgram_conn_lookup_register(dl->pending_conns, urxe, conn_ssl)) {
-            dtls_listener_connection_free(conn_ssl);
+            dtls_listener_conn_free_locked(dl, conn_ssl);
             goto release;
         }
 
@@ -1595,7 +1605,7 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
             sc = SSL_CONNECTION_FROM_SSL_ONLY(conn_ssl);
             if (sc == NULL || sc->d1 == NULL) {
                 ossl_dgram_conn_lookup_unregister(dl->pending_conns, &urxe->peer);
-                dtls_listener_connection_free(conn_ssl);
+                dtls_listener_conn_free_locked(dl, conn_ssl);
                 goto release;
             }
 
@@ -1620,7 +1630,7 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
                  * holds only its single reference and the free is safe.
                  */
                 ossl_dgram_conn_lookup_unregister(dl->pending_conns, &urxe->peer);
-                dtls_listener_connection_free(conn_ssl);
+                dtls_listener_conn_free_locked(dl, conn_ssl);
                 goto release;
             }
 
@@ -2521,7 +2531,7 @@ static int dtls_listener_drive_pass(DTLS_LISTENER *dl, int last_pass,
 
             /* Add to established connections (inline, we already hold mutex) */
             if (dl->established_conns == NULL || !ossl_dgram_conn_lookup_register_addr(dl->established_conns, &sc->d1->peer_addr, ssl)) {
-                dtls_listener_connection_free(ssl);
+                dtls_listener_conn_free_locked(dl, ssl);
                 continue;
             }
 
@@ -2532,7 +2542,7 @@ static int dtls_listener_drive_pass(DTLS_LISTENER *dl, int last_pass,
                 /* Failed to add to queue, unregister and free */
                 ossl_dgram_conn_lookup_unregister(dl->established_conns,
                     &sc->d1->peer_addr);
-                dtls_listener_connection_free(ssl);
+                dtls_listener_conn_free_locked(dl, ssl);
             }
         }
     }
@@ -2553,7 +2563,7 @@ static int dtls_listener_drive_pass(DTLS_LISTENER *dl, int last_pass,
         if (sc != NULL && sc->d1 != NULL)
             ossl_dgram_conn_lookup_unregister(dl->pending_conns, &sc->d1->peer_addr);
 
-        dtls_listener_connection_free(ssl);
+        dtls_listener_conn_free_locked(dl, ssl);
     }
 
     *again = dl->pending_input;
@@ -2768,7 +2778,7 @@ end:
              */
             if (sc != NULL && sc->d1 != NULL)
                 ossl_dtls_listener_unregister_established_conn(ssl, &sc->d1->peer_addr);
-            /* dtls_listener_connection_free() takes the CID out */
+            ossl_dtls_listener_unregister_conn_cid(ssl, conn);
             dtls_listener_connection_free(conn);
             ERR_raise(ERR_LIB_SSL, ERR_R_INTERNAL_ERROR);
             return NULL;
