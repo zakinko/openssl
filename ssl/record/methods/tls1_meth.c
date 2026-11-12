@@ -22,9 +22,7 @@
 #define DTLS_CID_SEQ_NUM_PLACEHOLDER_LEN 8
 /* 8 + tls12_cid + cid_length + tls12_cid + version(2) + epoch(2) + seq(6) */
 #define DTLS_CID_MAC_HEADER_FIXED_LEN (DTLS_CID_SEQ_NUM_PLACEHOLDER_LEN + 13)
-/* ... + cid + a two byte length */
-#define DTLS_CID_MAC_HEADER_MAX_LEN \
-    (DTLS_CID_MAC_HEADER_FIXED_LEN + SSL_DTLS_CID_MAX_LEN + 2)
+/* ... + cid + a two byte length: SSL3_CBC_MAX_HEADER_LENGTH */
 
 static int tls1_set_crypto_state(OSSL_RECORD_LAYER *rl, int level,
     unsigned char *snkey,
@@ -181,14 +179,18 @@ static int tls1_set_crypto_state(OSSL_RECORD_LAYER *rl, int level,
         int aead = (EVP_CIPHER_get_flags(ciph) & EVP_CIPH_FLAG_AEAD_CIPHER) != 0;
 
         /*
-         * RFC 9146 sections 5.2 (block cipher with Encrypt-then-MAC) and 5.3
-         * (AEAD) are implemented, 5.1 (MAC-then-encrypt) is not; see
-         * tls_dtls_cid_record_protection_ok(), which keeps the handshake from
-         * getting here with one.  A "composite" cipher (AES-CBC-HMAC-SHA)
-         * carries the AEAD flag but is CBC MAC-then-encrypt underneath.
+         * RFC 9146 section 5.3 (AEAD), 5.2 (block cipher with
+         * Encrypt-then-MAC) and 5.1 (block cipher, MAC-then-encrypt).  The
+         * receiving side of 5.1 needs the HMAC provider to take the longer
+         * header in constant time ("tls-header-size"); see
+         * tls_dtls_cid_record_protection_ok(), which keeps the handshake
+         * from getting here without it.  A "composite" cipher
+         * (AES-CBC-HMAC-SHA) carries the AEAD flag but is CBC
+         * MAC-then-encrypt underneath; ssl_cipher_get_evp() never picks one
+         * for DTLS.
          */
         if (!(aead && mode != EVP_CIPH_CBC_MODE)
-            && !(rl->use_etm && mode == EVP_CIPH_CBC_MODE)) {
+            && mode != EVP_CIPH_CBC_MODE) {
             ERR_raise(ERR_LIB_SSL, SSL_R_CONNECTION_ID_NOT_SUPPORTED_WITH_CIPHER);
             return OSSL_RECORD_RETURN_FATAL;
         }
@@ -304,7 +306,7 @@ static int dtls_cid_aead_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec,
     EVP_CIPHER_CTX *ds = rl->enc_ctx;
     int mode = EVP_CIPHER_CTX_get_mode(ds);
     unsigned char nonce[EVP_MAX_IV_LENGTH];
-    unsigned char aad[DTLS_CID_MAC_HEADER_MAX_LEN];
+    unsigned char aad[SSL3_CBC_MAX_HEADER_LENGTH];
     unsigned char seq64[8];
     unsigned char *explicit, *data, *tag;
     size_t aadlen, inlen, i;
@@ -475,9 +477,9 @@ static int tls1_cipher(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *recs,
     enc = EVP_CIPHER_CTX_get0_cipher(rl->enc_ctx);
 
     /*
-     * A tls12_cid record under an AEAD cipher (RFC 9146 section 5.3); the
-     * record layer was only set up with a CID for a true AEAD or for CBC with
-     * Encrypt-then-MAC (tls1_set_crypto_state()).
+     * A tls12_cid record under an AEAD cipher (RFC 9146 section 5.3).  With
+     * a CBC cipher (sections 5.1 and 5.2) the record is encrypted below as
+     * any other, and only its MAC differs (tls1_mac()).
      */
     if (rl->cid_len != 0
         && (EVP_CIPHER_get_flags(enc) & EVP_CIPH_FLAG_AEAD_CIPHER) != 0) {
@@ -685,7 +687,7 @@ static int tls1_mac(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec, unsigned char *md
     EVP_MD_CTX *hmac = NULL, *mac_ctx;
     EVP_PKEY_CTX *pkctx;
     unsigned char header[13];
-    unsigned char cidheader[DTLS_CID_MAC_HEADER_MAX_LEN];
+    unsigned char cidheader[SSL3_CBC_MAX_HEADER_LENGTH];
     size_t cidheaderlen = 0;
     int t;
     int ret = 0;
@@ -718,12 +720,17 @@ static int tls1_mac(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec, unsigned char *md
      * ENC(content + padding + padding_length)".  DTLSCiphertext.length is
      * taken as for Encrypt-then-MAC without a CID, the length of what the MAC
      * covers after the header (RFC 7366 section 3), which is |rec->length|
-     * here.  Section 5.1 (MAC-then-encrypt) is refused in
-     * tls1_set_crypto_state().
+     * here.
+     *
+     * Section 5.1 (MAC-then-encrypt): "length_of_DTLSInnerPlaintext +
+     * DTLSInnerPlaintext.content + DTLSInnerPlaintext.real_type +
+     * DTLSInnerPlaintext.zeros".  |rec->length| is the length of the
+     * DTLSInnerPlaintext: on sending it has its real_type
+     * (dtls_cid_add_record_padding()), and on receiving the cipher has taken
+     * the CBC padding and the MAC off it.
      */
     if (rl->cid_len != 0) {
-        if (!ossl_assert(rl->use_etm)
-            || !dtls_cid_write_header(rl, rec, rec->length, cidheader,
+        if (!dtls_cid_write_header(rl, rec, rec->length, cidheader,
                 sizeof(cidheader), &cidheaderlen))
             goto end;
     } else if (!setup_record_header(rl, rec, header, sizeof(header))) {
@@ -733,10 +740,14 @@ static int tls1_mac(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec, unsigned char *md
     if (!sending && !rl->use_etm
         && EVP_CIPHER_CTX_get_mode(rl->enc_ctx) == EVP_CIPH_CBC_MODE
         && ssl3_cbc_record_digest_supported(mac_ctx)) {
-        OSSL_PARAM tls_hmac_params[2], *p = tls_hmac_params;
+        OSSL_PARAM tls_hmac_params[3], *p = tls_hmac_params;
 
         *p++ = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_DATA_SIZE,
             &rec->orig_len);
+        /* The 13 byte TLS header is the provider's default */
+        if (cidheaderlen != 0)
+            *p++ = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_HEADER_SIZE,
+                &cidheaderlen);
         *p++ = OSSL_PARAM_construct_end();
 
         pkctx = EVP_MD_CTX_get_pkey_ctx(mac_ctx);
