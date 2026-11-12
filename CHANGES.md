@@ -61,11 +61,10 @@ OpenSSL 4.2
 
  * Added support for the DTLS 1.2 Connection ID ([RFC 9146]): the
    "connection_id" extension and the tls12_cid record format, for AEAD
-   ciphers and for CBC ciphers with Encrypt-then-MAC.  The MAC-then-encrypt
-   record protection of RFC 9146 section 5.1 is not implemented: a server
-   does not accept the extension with a CBC cipher without Encrypt-then-MAC,
-   and a client fails the handshake if a server does.  See
-   `SSL_set1_dtls_cid(3)`.
+   ciphers and for CBC ciphers with and without Encrypt-then-MAC.  The HMAC
+   provider takes a new parameter, "tls-header-size", to check the MAC of a
+   MAC-then-encrypt record with its longer header (RFC 9146 section 5.1) in
+   constant time.  See `SSL_set1_dtls_cid(3)`.
 
    *Showta Ishizaki*
 

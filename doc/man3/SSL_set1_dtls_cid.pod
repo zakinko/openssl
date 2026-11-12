@@ -150,18 +150,18 @@ having validated the new address in some way of its own (RFC 9853 section
 =head1 NOTES
 
 The record protection of RFC 9146 is implemented for AEAD ciphers (AES-GCM,
-AES-CCM, ChaCha20-Poly1305; section 5.3) and for CBC ciphers with
-Encrypt-then-MAC (RFC 7366; section 5.2). The MAC-then-encrypt form of
-section 5.1 is not implemented, so a CID is not used with a CBC cipher unless
-Encrypt-then-MAC is negotiated with it. A server on which the CID is enabled
-does not answer the extension in that case, and the connection is made
+AES-CCM, ChaCha20-Poly1305; section 5.3), for CBC ciphers with
+Encrypt-then-MAC (RFC 7366; section 5.2) and for CBC ciphers without it
+(section 5.1). Without Encrypt-then-MAC the MAC of a received record is
+checked in constant time by the HMAC provider, which has to support the
+"tls-header-size" parameter (see L<EVP_MAC-HMAC(7)>). If it does not, as with
+an older FIPS provider, a server on which the CID is enabled does not answer
+the extension when such a cipher is negotiated, and the connection is made
 without CIDs. A client on which the CID is enabled fails the handshake, with a
 handshake_failure alert and the error
 B<SSL_R_CONNECTION_ID_NOT_SUPPORTED_WITH_CIPHER>, if the server answers the
-extension in that case, as a server that implements section 5.1 does; to
-connect to such a server, do not enable the CID, or offer only AEAD cipher
-suites. The same holds for the cipher suites without encryption and for DTLS
-1.0, which RFC 9146 does not cover.
+extension in that case. The same holds for the cipher suites without
+encryption and for DTLS 1.0, which RFC 9146 does not cover.
 
 The CID is part of every record and takes its length from each datagram. A
 CID so long that the path MTU leaves no room for the handshake messages

@@ -3277,15 +3277,75 @@ end:
 }
 
 /*
+ * RFC 9146 section 5.1: CBC without Encrypt-then-MAC.  The receiving side
+ * checks the MAC in constant time over the longer header, through the HMAC
+ * provider's "tls-header-size".  idx / 3 picks the MAC (HMAC-SHA256 with its
+ * 64 byte hash block, HMAC-SHA384 with its 128 byte one), idx % 3 the CID
+ * directions as in test_dtls_cid().
+ */
+static int test_dtls_cid_mte(int idx)
+{
+    static const char *suites[] = {
+        "ECDHE-RSA-AES128-SHA256",
+        "ECDHE-RSA-AES256-SHA384",
+    };
+    static const int lens[3][2] = {
+        { sizeof(cid_client), sizeof(cid_server) },
+        { 0, sizeof(cid_server) },
+        { sizeof(cid_client), 0 },
+    };
+    int clen = lens[idx % 3][0], slen = lens[idx % 3][1];
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    CID_LAST_HDR clast, slast;
+    int testresult = 0;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    if (!SSL_CTX_set_cipher_list(cctx, suites[idx / 3])) {
+        testresult = TEST_skip("%s not available", suites[idx / 3]);
+        goto end;
+    }
+    if (!TEST_true(SSL_CTX_set_cipher_list(sctx, suites[idx / 3])))
+        goto end;
+    SSL_CTX_set_options(cctx, SSL_OP_NO_ENCRYPT_THEN_MAC);
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl, NULL, NULL))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, (size_t)clen))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, (size_t)slen)))
+        goto end;
+    BIO_ctrl(SSL_get_wbio(cssl), MEMPACKET_CTRL_SET_CID_LEN, slen, NULL);
+    BIO_ctrl(SSL_get_wbio(sssl), MEMPACKET_CTRL_SET_CID_LEN, clen, NULL);
+    SSL_set_msg_callback(cssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(cssl, &clast);
+    SSL_set_msg_callback(sssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(sssl, &slast);
+    if (!TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !TEST_int_eq(SSL_get0_dtls_cid(cssl, NULL, NULL, NULL, NULL), 1)
+        || !TEST_int_eq(SSL_get0_dtls_cid(sssl, NULL, NULL, NULL, NULL), 1)
+        || !cid_send(cssl, sssl, cid_server, (size_t)slen, &clast)
+        || !cid_send(sssl, cssl, cid_client, (size_t)clen, &slast)
+        || !cid_send(cssl, sssl, cid_server, (size_t)slen, &clast))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/*
  * Connections where the extension is not negotiated go ahead without CIDs.
- *   0: both sides enable it, but the client turns Encrypt-then-MAC off, so
- *      RFC 9146 section 5.1 (MAC-then-encrypt) would apply, which is not
- *      implemented, and the server declines
- *   1: only the client enables it; the server ignores it
- *   2: only the server enables it; the client does not offer it
- *   3: both sides enable it with a cipher suite without encryption, which
- *      keeps Encrypt-then-MAC negotiated but is not a block cipher
- *   4: both sides enable it and negotiate DTLS 1.0, which RFC 9146 does not
+ *   0: only the client enables it; the server ignores it
+ *   1: only the server enables it; the client does not offer it
+ *   2: both sides enable it with a cipher suite without encryption, which
+ *      is neither a block cipher (RFC 9146 sections 5.1, 5.2) nor an AEAD
+ *      (section 5.3)
+ *   3: both sides enable it and negotiate DTLS 1.0, which RFC 9146 does not
  *      extend
  */
 static int test_dtls_cid_declined(int idx)
@@ -3297,16 +3357,16 @@ static int test_dtls_cid_declined(int idx)
     int testresult = 0;
 
 #ifdef OPENSSL_NO_DTLS1
-    if (idx == 4)
+    if (idx == 3)
         return TEST_skip("DTLS 1.0 is not available");
 #endif
-    if (idx == 3)
+    if (idx == 2)
         cipher = "NULL-SHA256:@SECLEVEL=0";
-    else if (idx == 4)
+    else if (idx == 3)
         cipher = "ECDHE-RSA-AES128-SHA:@SECLEVEL=0";
     if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
             DTLS_client_method(), DTLS1_VERSION,
-            idx == 4 ? DTLS1_VERSION : DTLS1_2_VERSION,
+            idx == 3 ? DTLS1_VERSION : DTLS1_2_VERSION,
             &sctx, &cctx, cert, privkey)))
         goto end;
     if (!SSL_CTX_set_cipher_list(cctx, cipher)) {
@@ -3315,12 +3375,10 @@ static int test_dtls_cid_declined(int idx)
     }
     if (!TEST_true(SSL_CTX_set_cipher_list(sctx, cipher)))
         goto end;
-    if (idx == 0)
-        SSL_CTX_set_options(cctx, SSL_OP_NO_ENCRYPT_THEN_MAC);
     if (!TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl, NULL, NULL))
-        || (idx != 2
-            && !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client))))
         || (idx != 1
+            && !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client))))
+        || (idx != 0
             && !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server)))))
         goto end;
     SSL_set_msg_callback(cssl, cid_msg_cb);
@@ -5298,7 +5356,8 @@ int setup_tests(void)
 #endif
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_ALL_TESTS(test_dtls_cid, OSSL_NELEM(cid_ciphers) * 3);
-    ADD_ALL_TESTS(test_dtls_cid_declined, 5);
+    ADD_ALL_TESTS(test_dtls_cid_declined, 4);
+    ADD_ALL_TESTS(test_dtls_cid_mte, 6);
     ADD_ALL_TESTS(test_dtls_cid_discard,
         OSSL_NELEM(cid_ciphers) * CID_DISCARD_CASES);
     ADD_ALL_TESTS(test_dtls_cid_max_fragment, 2);
