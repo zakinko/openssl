@@ -247,6 +247,21 @@ static int test_bio_dgram_impl(int af, int use_local)
     if (!TEST_int_gt(BIO_ADDR_rawport(addr2), 0))
         goto err;
 
+    /*
+     * The burst of OSSL_NELEM(tx_msg) datagrams below must all fit in the
+     * receive buffer, since they are read back with a blocking socket.  Some
+     * stacks charge each datagram far more than its length (NetBSD charges a
+     * whole mbuf of 512 bytes against a 41600 byte default and drops the
+     * rest), so make room for 1KB per datagram.  Failure is not fatal; the
+     * default is enough elsewhere.
+     */
+    {
+        int rcvbuf = (int)OSSL_NELEM(tx_msg) * 1024;
+
+        (void)setsockopt(fd2, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbuf,
+            sizeof(rcvbuf));
+    }
+
     b1 = BIO_new_dgram(fd1, 0);
     if (!TEST_ptr(b1))
         goto err;
