@@ -361,6 +361,54 @@ int tls_parse_ctos_etm(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
  */
 int tls_parse_ctos_connection_id(SSL_CONNECTION *s, PACKET *pkt,
     unsigned int context, X509 *x, size_t chainidx);
+
+/**
+ * @brief Note an "rrc" extension in the ClientHello (RFC 9853 section 3).
+ * @param s the server connection
+ * @param pkt the extension data, which must be empty
+ * @param context the extension context
+ * @param x unused
+ * @param chainidx unused
+ * @returns 1 on success, 0 on error (SSLfatal() called)
+ */
+int tls_parse_ctos_rrc(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
+    X509 *x, size_t chainidx);
+
+/**
+ * @brief Answer the client's "rrc" extension (RFC 9853 section 3).
+ * @param s the server connection
+ * @param pkt the packet the extension is written into
+ * @param context the extension context
+ * @param x unused
+ * @param chainidx unused
+ * @returns EXT_RETURN_SENT, EXT_RETURN_NOT_SENT or EXT_RETURN_FAIL
+ */
+EXT_RETURN tls_construct_stoc_rrc(SSL_CONNECTION *s, WPACKET *pkt,
+    unsigned int context, X509 *x, size_t chainidx);
+
+/**
+ * @brief Offer the "rrc" extension (RFC 9853 section 3).
+ * @param s the client connection
+ * @param pkt the packet the extension is written into
+ * @param context the extension context
+ * @param x unused
+ * @param chainidx unused
+ * @returns EXT_RETURN_SENT, EXT_RETURN_NOT_SENT or EXT_RETURN_FAIL
+ */
+EXT_RETURN tls_construct_ctos_rrc(SSL_CONNECTION *s, WPACKET *pkt,
+    unsigned int context, X509 *x, size_t chainidx);
+
+/**
+ * @brief Take the server's "rrc" extension (RFC 9853 section 3).
+ * @param s the client connection
+ * @param pkt the extension data, which must be empty
+ * @param context the extension context
+ * @param x unused
+ * @param chainidx unused
+ * @returns 1 on success, 0 on error (SSLfatal() called)
+ */
+int tls_parse_stoc_rrc(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
+    X509 *x, size_t chainidx);
 int tls_parse_ctos_key_share(SSL_CONNECTION *s, PACKET *pkt,
     unsigned int context, X509 *x, size_t chainidx);
 int tls_parse_ctos_cookie(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,

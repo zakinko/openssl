@@ -8762,10 +8762,14 @@ static uint16_t conn_peer_port(SSL *ssl)
 
 /*
  *   0: the client stays put
- *   1: the client moves; the callback says no, so the address stays
- *   2: the client moves; the callback says yes, so the address moves
+ *   1: the client moves; no RRC, the callback says no, so the address stays
+ *   2: the client moves; no RRC, the callback says yes, so the address moves
  *   3: the listener gives no CIDs; the extension is not negotiated
  *   4: an application cannot replace the CID the listener chose
+ *   5: the client moves; the Return Routability Check (RFC 9853) succeeds
+ *      and the address moves, without asking the callback
+ *   6: the client moves; the check times out (section 5.1, "If T expires,
+ *      the peer address binding is not updated")
  */
 static int test_dtls12_listener_cid(int idx)
 {
@@ -8795,7 +8799,13 @@ static int test_dtls12_listener_cid(int idx)
         || (idx != 3
             && !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
                 SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN)))
-        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid))))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid)))
+        || ((idx == 1 || idx == 2)
+            && !TEST_true(SSL_set_dtls_rrc(clientssl, 0))))
+        goto end;
+    timeout_test_fake_time = ossl_time_now();
+    if (!TEST_true(ossl_dtls_listener_set_override_now_cb(listener,
+            timeout_test_now_cb, NULL)))
         goto end;
 
     SSL_set_connect_state(clientssl);
@@ -8843,7 +8853,11 @@ static int test_dtls12_listener_cid(int idx)
         goto end;
     }
 
-    if (idx == 1 || idx == 2) {
+    if (!TEST_int_eq(SSL_get_dtls_rrc(serverssl), idx != 1 && idx != 2)
+        || !TEST_int_eq(SSL_get_dtls_rrc(clientssl), idx != 1 && idx != 2))
+        goto end;
+
+    if (idx == 1 || idx == 2 || idx == 5 || idx == 6) {
         /* A NAT rebinding: the client's datagrams now come from port 23456 */
         ina.s_addr = htonl(INADDR_LOOPBACK);
         if (!TEST_ptr(moved = BIO_ADDR_new())
@@ -8878,6 +8892,30 @@ static int test_dtls12_listener_cid(int idx)
             || !TEST_int_eq(conn_peer_port(serverssl), 23456))
             goto end;
         break;
+    case 5:
+    case 6:
+        /*
+         * The server has sent a path_challenge to the new address and still
+         * sends to the old one; the callback is not asked.
+         */
+        if (!TEST_int_eq(peer_change_calls, 0)
+            || !TEST_int_eq(conn_peer_port(serverssl), 12345)
+            || !TEST_true(SSL_get0_dtls_cid(serverssl, NULL, NULL, NULL, NULL))
+            || !TEST_true(SSL_get_dtls_rrc(serverssl)))
+            goto end;
+        if (idx == 6)
+            timeout_test_fake_time = ossl_time_add(timeout_test_fake_time,
+                ossl_ms2time(2000));
+        /* The client answers the challenge while waiting for data */
+        if (!TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ)
+            /* and the server takes the path_response */
+            || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+            || !TEST_int_eq(conn_peer_port(serverssl), idx == 5 ? 23456 : 12345)
+            || !TEST_int_eq(peer_change_calls, 0))
+            goto end;
+        break;
     }
 
     /* And the other way */
@@ -8897,6 +8935,479 @@ end:
     SSL_CTX_free(cctx);
     return testresult;
 }
+
+/*
+ * Take the datagrams the client has sent off the wire and pass them on.  The
+ * one that holds the client's Finished, its first record with a CID, after
+ * the epoch 0 records of its flight is split there: the epoch 0 records go
+ * on, the server takes them, and the Finished follows in a datagram of its
+ * own from port 23456.
+ */
+static int cid_split_client_finished(SSL *listener, SSL *clientssl,
+    SSL *serverssl, int *split)
+{
+    static unsigned char dgram[8][4096];
+    BIO *wire = SSL_get_rbio(listener), *cbio = SSL_get_wbio(clientssl);
+    BIO_ADDR *moved = NULL;
+    struct in_addr ina;
+    int len[8], num = 0, i, off, ret;
+
+    while (num < 8 && (len[num] = BIO_read(wire, dgram[num], sizeof(dgram[0]))) > 0)
+        num++;
+    for (i = 0; i < num; i++) {
+        for (off = 0; off + DTLS1_RT_HEADER_LENGTH <= len[i]
+            && dgram[i][off] != SSL3_RT_TLS12_CID;)
+            off += DTLS1_RT_HEADER_LENGTH
+                + ((dgram[i][off + 11] << 8) | dgram[i][off + 12]);
+        if (*split || off == 0 || off >= len[i]) {
+            if (!TEST_int_eq(BIO_write(cbio, dgram[i], len[i]), len[i]))
+                return 0;
+            continue;
+        }
+        if (!TEST_int_eq(BIO_write(cbio, dgram[i], off), off))
+            return 0;
+        /* ClientKeyExchange and ChangeCipherSpec; the server waits on */
+        ret = SSL_accept(serverssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(serverssl, ret), SSL_ERROR_WANT_READ))
+            return 0;
+        ina.s_addr = htonl(INADDR_LOOPBACK);
+        if (!TEST_ptr(moved = BIO_ADDR_new())
+            || !TEST_true(BIO_ADDR_rawmake(moved, AF_INET, &ina, sizeof(ina),
+                htons(23456)))
+            || !TEST_int_eq(BIO_dgram_set0_local_addr(cbio, moved), 1)) {
+            BIO_ADDR_free(moved);
+            return 0;
+        }
+        if (!TEST_int_eq(BIO_write(cbio, dgram[i] + off, len[i] - off),
+                len[i] - off))
+            return 0;
+        *split = 1;
+    }
+    return 1;
+}
+
+/*
+ * Take the datagrams the server has sent off the wire and pass them on,
+ * counting the return_routability_check records of epoch 0 among them.
+ */
+static int cid_count_plain_rrc(SSL *listener, SSL *clientssl, int *plain_rrc)
+{
+    static unsigned char dgram[8][4096];
+    BIO *wire = SSL_get_rbio(clientssl), *lbio = SSL_get_wbio(listener);
+    int len[8], num = 0, i, off;
+
+    while (num < 8 && (len[num] = BIO_read(wire, dgram[num], sizeof(dgram[0]))) > 0)
+        num++;
+    for (i = 0; i < num; i++) {
+        for (off = 0; off + DTLS1_RT_HEADER_LENGTH <= len[i]
+            && dgram[i][off] != SSL3_RT_TLS12_CID;) {
+            if (dgram[i][off] == SSL3_RT_RETURN_ROUTABILITY_CHECK
+                && dgram[i][off + 3] == 0 && dgram[i][off + 4] == 0)
+                (*plain_rrc)++;
+            off += DTLS1_RT_HEADER_LENGTH
+                + ((dgram[i][off + 11] << 8) | dgram[i][off + 12]);
+        }
+        if (!TEST_int_eq(BIO_write(lbio, dgram[i], len[i]), len[i]))
+            return 0;
+    }
+    return 1;
+}
+
+/*
+ * The client's Finished comes from another address than the rest of its
+ * flight.  The server has read it but still writes epoch 0 until its own
+ * ChangeCipherSpec, and a path_challenge "MUST be authenticated and
+ * encrypted using the currently active security context" (RFC 9853 section
+ * 4): none is sent until there is one.
+ */
+static int test_dtls12_listener_cid_move_in_handshake(void)
+{
+    static const unsigned char ccid[] = { 0xc1, 0xc2 };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *serverssl = NULL, *clientssl = NULL;
+    BIO_ADDR *client_addr = NULL;
+    size_t n;
+    char buf[64];
+    int abortctr = 0, testresult = 0, split = 0, plain_rrc = 0;
+    int cdone = 0, sdone = 0, i, ret;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_true(create_dtls_listener_and_client_mem(sctx, cctx,
+            SSL_LISTENER_FLAG_NO_VALIDATE | SSL_LISTENER_FLAG_SINGLE_THREAD,
+            &listener, &clientssl, &client_addr))
+        || !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
+            SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid))))
+        goto end;
+
+    SSL_set_connect_state(clientssl);
+    while (serverssl == NULL) {
+        if (!TEST_int_lt(++abortctr, 100))
+            goto end;
+        ret = SSL_connect(clientssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        serverssl = SSL_accept_connection(listener,
+            SSL_ACCEPT_CONNECTION_NO_BLOCK);
+    }
+    for (i = 0; i < 20 && !(cdone && sdone); i++) {
+        if (!cdone) {
+            ret = SSL_connect(clientssl);
+            cdone = ret > 0;
+            if (ret <= 0
+                && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+                goto end;
+        }
+        if (!cid_split_client_finished(listener, clientssl, serverssl, &split))
+            goto end;
+        if (!sdone) {
+            ret = SSL_accept(serverssl);
+            sdone = ret > 0;
+            if (ret <= 0
+                && !TEST_int_eq(SSL_get_error(serverssl, ret), SSL_ERROR_WANT_READ))
+                goto end;
+        }
+        if (!cid_count_plain_rrc(listener, clientssl, &plain_rrc))
+            goto end;
+    }
+    if (!TEST_true(cdone && sdone)
+        || !TEST_true(split)
+        || !TEST_int_eq(plain_rrc, 0)
+        || !TEST_true(SSL_get_dtls_rrc(serverssl))
+        || !TEST_int_eq(conn_peer_port(serverssl), 12345))
+        goto end;
+
+    /* With the handshake done the check runs, and the address moves */
+    if (!TEST_true(SSL_write_ex(clientssl, "moved", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "moved", 5)
+        || !TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_int_eq(conn_peer_port(serverssl), 23456))
+        goto end;
+
+    testresult = 1;
+end:
+    BIO_ADDR_free(client_addr);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+/*
+ * RFC 9146 section 6, the "newer" condition.  A record
+ * that passes verification and anti-replay but is older than the newest
+ * record received must not move the peer address, even from a new source.
+ */
+static int test_dtls12_listener_cid_older_record(void)
+{
+    static const unsigned char ccid[] = { 0xc1, 0xc2 };
+    static unsigned char d1[4096], d2[4096];
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *serverssl = NULL, *clientssl = NULL;
+    BIO_ADDR *client_addr = NULL, *moved = NULL;
+    BIO *wire, *cbio;
+    struct in_addr ina;
+    size_t n;
+    char buf[64];
+    int abortctr = 0, testresult = 0, len1, len2, ret;
+
+    peer_change_calls = 0;
+    peer_change_answer = 1;
+    peer_change_new_port = 0;
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    SSL_CTX_set_dtls_peer_addr_change_cb(sctx, peer_change_cb, NULL);
+    if (!TEST_true(create_dtls_listener_and_client_mem(sctx, cctx,
+            SSL_LISTENER_FLAG_NO_VALIDATE | SSL_LISTENER_FLAG_SINGLE_THREAD,
+            &listener, &clientssl, &client_addr))
+        || !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
+            SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid)))
+        || !TEST_true(SSL_set_dtls_rrc(clientssl, 0)))
+        goto end;
+    SSL_set_connect_state(clientssl);
+    while (serverssl == NULL) {
+        if (!TEST_int_lt(++abortctr, 100))
+            goto end;
+        ret = SSL_connect(clientssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        serverssl = SSL_accept_connection(listener,
+            SSL_ACCEPT_CONNECTION_NO_BLOCK);
+    }
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE))
+        || !TEST_int_eq(conn_peer_port(serverssl), 12345))
+        goto end;
+
+    wire = SSL_get_rbio(listener);
+    cbio = SSL_get_wbio(clientssl);
+    /* Two records; the first is held back, the second delivered */
+    if (!TEST_true(SSL_write_ex(clientssl, "one", 3, &n))
+        || !TEST_int_gt(len1 = BIO_read(wire, d1, sizeof(d1)), 0)
+        || !TEST_true(SSL_write_ex(clientssl, "two", 3, &n))
+        || !TEST_int_gt(len2 = BIO_read(wire, d2, sizeof(d2)), 0)
+        || !TEST_int_eq(d1[0], SSL3_RT_TLS12_CID)
+        || !TEST_int_eq(BIO_write(cbio, d2, len2), len2)
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "two", 3)
+        || !TEST_int_eq(peer_change_calls, 0))
+        goto end;
+
+    /* The older record arrives from a new address: valid, but not newer */
+    ina.s_addr = htonl(INADDR_LOOPBACK);
+    if (!TEST_ptr(moved = BIO_ADDR_new())
+        || !TEST_true(BIO_ADDR_rawmake(moved, AF_INET, &ina, sizeof(ina),
+            htons(34567)))
+        || !TEST_int_eq(BIO_dgram_set0_local_addr(cbio, moved), 1))
+        goto end;
+    moved = NULL;
+    if (!TEST_int_eq(BIO_write(cbio, d1, len1), len1)
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "one", 3)
+        || !TEST_int_eq(peer_change_calls, 0)
+        || !TEST_int_eq(conn_peer_port(serverssl), 12345))
+        goto end;
+
+    /* A newer record from there asks the callback, and moves */
+    if (!TEST_true(SSL_write_ex(clientssl, "three", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "three", 5)
+        || !TEST_int_eq(peer_change_calls, 1)
+        || !TEST_int_eq(conn_peer_port(serverssl), 34567))
+        goto end;
+
+    testresult = 1;
+end:
+    BIO_ADDR_free(moved);
+    BIO_ADDR_free(client_addr);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/*
+ * RFC 9853 section 5.4, "The initiator MUST silently
+ * discard any invalid path_response".  While a check runs, messages that do
+ * not answer it come from the new address; the address must stay.  Then the
+ * genuine response moves it.
+ */
+static int test_dtls12_listener_rrc_bad_response(void)
+{
+    static const unsigned char ccid[] = { 0xc1, 0xc2 };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *serverssl = NULL, *clientssl = NULL;
+    SSL_CONNECTION *csc;
+    BIO_ADDR *client_addr = NULL, *moved = NULL;
+    struct in_addr ina;
+    size_t n, written;
+    char buf[64];
+    unsigned char msg[9 + 1];
+    int abortctr = 0, testresult = 0, ret, i;
+
+    peer_change_calls = 0;
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    SSL_CTX_set_dtls_peer_addr_change_cb(sctx, peer_change_cb, NULL);
+    if (!TEST_true(create_dtls_listener_and_client_mem(sctx, cctx,
+            SSL_LISTENER_FLAG_NO_VALIDATE | SSL_LISTENER_FLAG_SINGLE_THREAD,
+            &listener, &clientssl, &client_addr))
+        || !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
+            SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid))))
+        goto end;
+    SSL_set_connect_state(clientssl);
+    while (serverssl == NULL) {
+        if (!TEST_int_lt(++abortctr, 100))
+            goto end;
+        ret = SSL_connect(clientssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        serverssl = SSL_accept_connection(listener,
+            SSL_ACCEPT_CONNECTION_NO_BLOCK);
+    }
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE))
+        || !TEST_true(SSL_get_dtls_rrc(serverssl))
+        || !TEST_ptr(csc = SSL_CONNECTION_FROM_SSL_ONLY(clientssl)))
+        goto end;
+
+    /* Move; the server sends a path_challenge, which is left in the wire */
+    ina.s_addr = htonl(INADDR_LOOPBACK);
+    if (!TEST_ptr(moved = BIO_ADDR_new())
+        || !TEST_true(BIO_ADDR_rawmake(moved, AF_INET, &ina, sizeof(ina),
+            htons(23456)))
+        || !TEST_int_eq(BIO_dgram_set0_local_addr(SSL_get_wbio(clientssl),
+                            moved),
+            1))
+        goto end;
+    moved = NULL;
+    if (!TEST_true(SSL_write_ex(clientssl, "moved", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(conn_peer_port(serverssl), 12345))
+        goto end;
+
+    /*
+     * Answers that do not answer it: a wrong cookie, a path_drop, an unknown
+     * msg_type (section 4, "gracefully ignore") and a message too long
+     */
+    for (i = 0; i < 4; i++) {
+        memset(msg, 0x5a, sizeof(msg));
+        msg[0] = i == 3 ? 1 : i + 1;
+        if (!TEST_int_gt(do_dtls1_write(csc, SSL3_RT_RETURN_ROUTABILITY_CHECK,
+                             msg, sizeof(msg) - (i != 3), &written),
+                0)
+            || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+            || !TEST_int_eq(conn_peer_port(serverssl), 12345))
+            goto end;
+    }
+
+    /* Now the client reads the challenge and answers; the address moves */
+    if (!TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_int_eq(conn_peer_port(serverssl), 23456)
+        || !TEST_int_eq(peer_change_calls, 0))
+        goto end;
+
+    testresult = 1;
+end:
+    BIO_ADDR_free(moved);
+    BIO_ADDR_free(client_addr);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/* Have the client's datagrams come from |port| from now on */
+static int rrc_client_addr(SSL *clientssl, unsigned short port)
+{
+    BIO_ADDR *addr = BIO_ADDR_new();
+    struct in_addr ina;
+
+    ina.s_addr = htonl(INADDR_LOOPBACK);
+    if (!TEST_ptr(addr)
+        || !TEST_true(BIO_ADDR_rawmake(addr, AF_INET, &ina, sizeof(ina),
+            htons(port)))
+        || !TEST_int_eq(BIO_dgram_set0_local_addr(SSL_get_wbio(clientssl), addr),
+            1)) {
+        BIO_ADDR_free(addr);
+        return 0;
+    }
+    return 1;
+}
+
+/*
+ * RFC 9853 section 5: the algorithms "are not designed to handle nested
+ * rebindings".  A second address seen while the first is being checked does
+ * not disturb that check, and is checked once it has ended.
+ */
+static int test_dtls12_listener_rrc_nested(void)
+{
+    static const unsigned char ccid[] = { 0xc1, 0xc2 };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *serverssl = NULL, *clientssl = NULL;
+    SSL_CONNECTION *ssc;
+    BIO_ADDR *client_addr = NULL;
+    size_t n;
+    char buf[64];
+    unsigned char cookie[sizeof(ssc->d1->rrc_cookie)];
+    int abortctr = 0, testresult = 0, ret, i;
+
+    peer_change_calls = 0;
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    SSL_CTX_set_dtls_peer_addr_change_cb(sctx, peer_change_cb, NULL);
+    if (!TEST_true(create_dtls_listener_and_client_mem(sctx, cctx,
+            SSL_LISTENER_FLAG_NO_VALIDATE | SSL_LISTENER_FLAG_SINGLE_THREAD,
+            &listener, &clientssl, &client_addr))
+        || !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
+            SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid))))
+        goto end;
+    SSL_set_connect_state(clientssl);
+    while (serverssl == NULL) {
+        if (!TEST_int_lt(++abortctr, 100))
+            goto end;
+        ret = SSL_connect(clientssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        serverssl = SSL_accept_connection(listener,
+            SSL_ACCEPT_CONNECTION_NO_BLOCK);
+    }
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE))
+        || !TEST_true(SSL_get_dtls_rrc(serverssl))
+        || !TEST_ptr(ssc = SSL_CONNECTION_FROM_SSL_ONLY(serverssl)))
+        goto end;
+
+    /* Two moves in a row; the challenge to the first stays in the wire */
+    for (i = 0; i < 2; i++) {
+        if (!rrc_client_addr(clientssl, 23456 + i)
+            || !TEST_true(SSL_write_ex(clientssl, "moved", 5, &n))
+            || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(conn_peer_port(serverssl), 12345)
+            || !TEST_true(ssc->d1->rrc_pending)
+            || !TEST_int_eq(ntohs(BIO_ADDR_rawport(&ssc->d1->rrc_addr)), 23456))
+            goto end;
+        if (i == 0)
+            memcpy(cookie, ssc->d1->rrc_cookie, sizeof(cookie));
+        else if (!TEST_mem_eq(cookie, sizeof(cookie), ssc->d1->rrc_cookie,
+                     sizeof(ssc->d1->rrc_cookie)))
+            goto end;
+    }
+    /* The first check ends as it would have */
+    if (!rrc_client_addr(clientssl, 23456)
+        || !TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+        || !TEST_int_eq(conn_peer_port(serverssl), 23456))
+        goto end;
+    /* and the second address gets one of its own */
+    if (!rrc_client_addr(clientssl, 23457)
+        || !TEST_true(SSL_write_ex(clientssl, "again", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+        || !TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(conn_peer_port(serverssl), 23457)
+        || !TEST_int_eq(peer_change_calls, 0))
+        goto end;
+
+    testresult = 1;
+end:
+    BIO_ADDR_free(client_addr);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
 #endif /* OPENSSL_NO_DTLS1_2 */
 
 OPT_TEST_DECLARE_USAGE("certfile privkeyfile\n")
@@ -9070,7 +9581,11 @@ int setup_tests(void)
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_TEST(test_dtls12_listener_alert_after_hvr_frees_pending);
 #ifndef OPENSSL_NO_DTLS1_2
-    ADD_ALL_TESTS(test_dtls12_listener_cid, 5);
+    ADD_ALL_TESTS(test_dtls12_listener_cid, 7);
+    ADD_TEST(test_dtls12_listener_cid_move_in_handshake);
+    ADD_TEST(test_dtls12_listener_cid_older_record);
+    ADD_TEST(test_dtls12_listener_rrc_bad_response);
+    ADD_TEST(test_dtls12_listener_rrc_nested);
 #endif
 #endif
 
