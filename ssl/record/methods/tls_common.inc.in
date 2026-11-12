@@ -29,4 +29,6 @@ sub produce_ssl_param_decoder {
                           ['OSSL_LIBSSL_RECORD_LAYER_PARAM_BLOCK_PADDING', 'blockpad', 'size_t'],
                           ['OSSL_LIBSSL_RECORD_LAYER_PARAM_HS_PADDING',    'hspad',    'size_t'],
                           ['OSSL_LIBSSL_RECORD_LAYER_PARAM_READ_AHEAD',   'readahead', 'int'],
+                          ['OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID',      'cid',      'octet_string'],
+                          ['OSSL_LIBSSL_RECORD_LAYER_PARAM_DTLS_CID_MORE', 'cidmore',  'octet_string'],
                          )); -}

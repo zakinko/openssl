@@ -7,10 +7,14 @@ SSL_clear_dtls_cid,
 SSL_get0_dtls_cid,
 SSL_set_dtls_rrc,
 SSL_get_dtls_rrc,
+SSL_dtls_new_connection_id,
+SSL_dtls_request_connection_id,
+SSL_DTLS_CID_IMMEDIATE,
+SSL_DTLS_CID_SPARE,
 SSL_CTX_set_dtls_peer_addr_change_cb,
 SSL_dtls_peer_addr_change_cb_fn,
 SSL_DTLS_CID_MAX_LEN
-- DTLS 1.2 Connection ID
+- DTLS Connection ID
 
 =head1 SYNOPSIS
 
@@ -27,6 +31,11 @@ SSL_DTLS_CID_MAX_LEN
  int SSL_set_dtls_rrc(SSL *s, int enable);
  int SSL_get_dtls_rrc(const SSL *s);
 
+ #define SSL_DTLS_CID_IMMEDIATE 0
+ #define SSL_DTLS_CID_SPARE     1
+ int SSL_dtls_new_connection_id(SSL *s, int usage);
+ int SSL_dtls_request_connection_id(SSL *s, unsigned int num);
+
  typedef int (*SSL_dtls_peer_addr_change_cb_fn)(SSL *s,
                                                 const BIO_ADDR *old_addr,
                                                 const BIO_ADDR *new_addr,
@@ -41,9 +50,9 @@ A Connection ID (CID) is an identifier carried in every protected DTLS record
 of a connection. A receiver that finds its connections by the CID rather than
 by the address and port of the sender keeps a connection when the peer's
 address changes, for example after a NAT rebinding. OpenSSL implements the
-"connection_id" extension and the record format of RFC 9146 for DTLS 1.2.
-The use of Connection IDs in DTLS 1.3 (RFC 9147) is not implemented, and the
-extension is not negotiated in DTLS 1.3.
+"connection_id" extension and the record format of RFC 9146 for DTLS 1.2, and
+the use of Connection IDs in DTLS 1.3 described in RFC 9147, where the CID is
+carried in the unified header from the handshake epoch on.
 
 Each side of a connection chooses the CID it wants to find in the records it
 receives, and sends it to the peer in the extension; the peer puts it in every
@@ -74,6 +83,33 @@ SSL_set_dtls_rrc() turns the Return Routability Check of RFC 9853 on or off
 for the next handshake on I<s>. It is on by default and is offered, or
 accepted, only together with the Connection ID. SSL_get_dtls_rrc() reports
 whether it was negotiated in the last handshake.
+
+=head2 Changing the CIDs in DTLS 1.3
+
+After a DTLS 1.3 handshake that negotiated Connection IDs, either side can give
+the other further CIDs to use when sending to it (RFC 9147 section 9).
+
+SSL_dtls_new_connection_id() queues a NewConnectionId message with one new CID
+of the connection's own, of the length of the one it asked for in the
+handshake: the CID length is not carried in records, so all the CIDs a
+connection receives have the one length. With I<usage>
+B<SSL_DTLS_CID_IMMEDIATE> the peer must use it for all records from then on;
+with B<SSL_DTLS_CID_SPARE> it may. The old CIDs stay acceptable. A connection
+that receives with an empty CID cannot send this message.
+
+SSL_dtls_request_connection_id() queues a RequestConnectionId message asking
+the peer for I<num> spare CIDs. A connection that sends with an empty CID
+cannot send this message. OpenSSL answers a request with a NewConnectionId
+carrying up to the number asked for, and gives out at most 8 further CIDs over
+a connection; the RFC allows fewer, "including no CIDs at all". It keeps up to
+4 spare CIDs from the peer and discards the rest, as the RFC allows; spare CIDs
+are kept for use when moving to another path, which OpenSSL does not do on its
+own.
+
+Either message is sent the next time the connection is driven, for example by
+L<SSL_write(3)> or L<SSL_read(3)>, and a second of the same kind cannot be
+queued until the first has been acknowledged. Both fail on a connection that is
+not DTLS 1.3, has not finished its handshake, or did not negotiate a CID.
 
 =head2 Changes of peer address
 
@@ -132,7 +168,10 @@ SSL_get0_dtls_cid() returns 1 if the extension was negotiated and 0
 otherwise.
 
 SSL_set_dtls_rrc() returns 1 on success and 0 if I<s> is not a DTLS
-connection. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
+connection.
+
+SSL_dtls_new_connection_id() and SSL_dtls_request_connection_id() return 1 if
+the message has been queued and 0 otherwise. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
 negotiated and 0 otherwise.
 
 =head1 SEE ALSO
