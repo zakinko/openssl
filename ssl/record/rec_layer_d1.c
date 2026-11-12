@@ -349,6 +349,10 @@ start:
                 }
                 return ret;
             }
+#ifndef OPENSSL_NO_SOCK
+            /* RFC 9146 section 6: the record has passed verification */
+            ossl_dtls_note_record(sc, rr->epoch, rr->seq_num);
+#endif
             rr->off = 0;
             sc->rlayer.num_recs++;
         } while (sc->rlayer.rrlmethod->processed_read_pending(sc->rlayer.rrl)

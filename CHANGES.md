@@ -33,6 +33,13 @@ OpenSSL 4.2
 
 ### Changes between 4.1 and 4.2 [xx XXX xxxx]
 
+ * DTLS listeners can give their connections a Connection ID and find them
+   by it, so that a connection survives a change of the client's address.
+   See `SSL_VALUE_DTLS_LISTENER_CID_LEN` in `SSL_get_value_uint(3)` and
+   `SSL_CTX_set_dtls_peer_addr_change_cb()`.
+
+   *Showta Ishizaki*
+
  * Added support for the DTLS 1.2 Connection ID ([RFC 9146]): the
    "connection_id" extension and the tls12_cid record format, for AEAD
    ciphers and for CBC ciphers with Encrypt-then-MAC.  The MAC-then-encrypt
