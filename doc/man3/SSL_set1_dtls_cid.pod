@@ -5,6 +5,8 @@
 SSL_set1_dtls_cid,
 SSL_clear_dtls_cid,
 SSL_get0_dtls_cid,
+SSL_set_dtls_rrc,
+SSL_get_dtls_rrc,
 SSL_CTX_set_dtls_peer_addr_change_cb,
 SSL_dtls_peer_addr_change_cb_fn,
 SSL_DTLS_CID_MAX_LEN
@@ -21,6 +23,9 @@ SSL_DTLS_CID_MAX_LEN
  int SSL_get0_dtls_cid(const SSL *s, const unsigned char **own,
                        size_t *own_len, const unsigned char **peer,
                        size_t *peer_len);
+
+ int SSL_set_dtls_rrc(SSL *s, int enable);
+ int SSL_get_dtls_rrc(const SSL *s);
 
  typedef int (*SSL_dtls_peer_addr_change_cb_fn)(SSL *s,
                                                 const BIO_ADDR *old_addr,
@@ -65,6 +70,11 @@ pointer may then be NULL. Otherwise all four are set to NULL and zero. Any of
 the output arguments may be NULL. The pointers remain valid until the next
 handshake or until I<s> is freed.
 
+SSL_set_dtls_rrc() turns the Return Routability Check of RFC 9853 on or off
+for the next handshake on I<s>. It is on by default and is offered, or
+accepted, only together with the Connection ID. SSL_get_dtls_rrc() reports
+whether it was negotiated in the last handshake.
+
 =head2 Changes of peer address
 
 A connection created by a DTLS listener (see L<SSL_new_listener(3)>) that
@@ -76,12 +86,23 @@ RFC 9146 section 6 allows: the record passed verification, it is newer than
 any record received before, and the new address has been found able to
 receive. The last is decided as follows.
 
-The callback set with SSL_CTX_set_dtls_peer_addr_change_cb() on the
+If the Return Routability Check was negotiated, the connection sends a
+path_challenge to the new address and moves there when the matching
+path_response comes back within one second (RFC 9853 section 5.1). Until then
+it keeps sending to the old address, so nothing larger than the challenge
+goes to an address that has not been validated. The enhanced check of RFC
+9853 section 5.2 is not implemented.
+OpenSSL sends one path_challenge per check and does not send it again, waits
+the one second RFC 9853 section 5.5 recommends, which cannot be changed, does
+not pad it to probe the path MTU, and keeps no statistics of failed checks.
+
+Otherwise the callback set with SSL_CTX_set_dtls_peer_addr_change_cb() on the
 B<SSL_CTX> the connection was made from is asked, with the address the
 connection sends to now and the new one; it returns 1 to move and 0 to stay,
 and is asked again for later records from the new address. Without a
 callback the address does not change. A callback that returns 1 without
-having validated the new address in some way of its own leaves the connection open to the attacks described in RFC 9146 section
+having validated the new address in some way of its own (RFC 9853 section
+3.1) leaves the connection open to the attacks described in RFC 9146 section
 9.
 
 =head1 NOTES
@@ -126,6 +147,10 @@ not being a DTLS connection.
 
 SSL_get0_dtls_cid() returns 1 if the extension was negotiated and 0
 otherwise.
+
+SSL_set_dtls_rrc() returns 1 on success and 0 if I<s> is not a DTLS
+connection. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
+negotiated and 0 otherwise.
 
 =head1 SEE ALSO
 

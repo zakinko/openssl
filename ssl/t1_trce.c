@@ -79,6 +79,7 @@ static const ssl_trace_tbl ssl_content_tbl[] = {
     { SSL3_RT_HANDSHAKE, "Handshake" },
     { SSL3_RT_APPLICATION_DATA, "ApplicationData" },
     { SSL3_RT_TLS12_CID, "tls12_cid" },
+    { SSL3_RT_RETURN_ROUTABILITY_CHECK, "ReturnRoutabilityCheck" },
 };
 
 /* Handshake types, sorted by ascending id  */
@@ -500,6 +501,7 @@ static const ssl_trace_tbl ssl_exts_tbl[] = {
     { TLSEXT_TYPE_signature_algorithms_cert, "signature_algorithms_cert" },
     { TLSEXT_TYPE_key_share, "key_share" },
     { TLSEXT_TYPE_connection_id, "connection_id" },
+    { TLSEXT_TYPE_rrc, "rrc" },
     { TLSEXT_TYPE_renegotiate, "renegotiate" },
 #ifndef OPENSSL_NO_NEXTPROTONEG
     { TLSEXT_TYPE_next_proto_neg, "next_proto_neg" },
