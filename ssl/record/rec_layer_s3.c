@@ -1192,6 +1192,16 @@ static int rlayer_dtls_get_urxe_packet(void *cbarg, unsigned char **data,
     if (urxe == NULL)
         return 0;
 
+    /*
+     * Remember where this datagram came from, and the epoch read at the
+     * time, for ossl_dtls_note_record().
+     */
+    s->d1->rx_peer = urxe->peer;
+    s->d1->rx_peer_set = 1;
+    if (s->rlayer.rrlmethod == NULL || s->rlayer.rrlmethod->get_epoch == NULL
+        || !s->rlayer.rrlmethod->get_epoch(s->rlayer.rrl, &s->d1->rx_epoch))
+        s->d1->rx_peer_set = 0;
+
     *data = ossl_dgram_urxe_data(urxe);
     *len = urxe->data_len;
     *packet_handle = urxe;

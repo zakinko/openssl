@@ -1090,6 +1090,10 @@ struct ssl_ctx_st {
     SSL_new_pending_conn_cb_fn new_pending_conn_cb;
     void *new_pending_conn_arg;
 
+    /* Callback deciding DTLS peer address changes, RFC 9146 section 6 */
+    SSL_dtls_peer_addr_change_cb_fn dtls_peer_addr_change_cb;
+    void *dtls_peer_addr_change_arg;
+
     /* TLS extensions. */
     struct {
         /* TLS extensions servername callback */
@@ -2309,6 +2313,19 @@ typedef struct dtls1_state_st {
      * listener's network BIO.
      */
     BIO_ADDR peer_addr;
+
+    /*
+     * Source of the datagram the record layer took last, and the epoch and
+     * sequence number of the newest record read so far: what RFC 9146
+     * section 6 needs to tell whether a record from a new address may move
+     * |peer_addr| to it.
+     */
+    BIO_ADDR rx_peer;
+    int rx_peer_set;
+    uint64_t rx_epoch;
+    int have_newest;
+    uint64_t newest_epoch;
+    uint64_t newest_seq;
 #endif
 
 #ifndef OPENSSL_NO_DTLS
@@ -2425,6 +2442,18 @@ typedef struct dtls_listener_st {
      * Use DGRAM_CONN_LOOKUP to keep track of established connections.
      */
     DGRAM_CONN_LOOKUP *established_conns;
+
+    /*
+     * DTLS 1.2 Connection IDs (RFC 9146).  When |cid_len| is not zero the
+     * listener gives every connection it makes a random CID of that length,
+     * and routes tls12_cid records by it in |cid_conns|.  A fixed length lets
+     * the listener find the end of a CID it did not negotiate itself:
+     * "implementations that want to use variable-length CIDs are responsible
+     * for constructing the CID in such a way that its length can be
+     * determined on reception" (section 3).  Protected by mutex.
+     */
+    size_t cid_len;
+    DGRAM_CID_LOOKUP *cid_conns;
 
     /* Have we started listening yet? */
     TSAN_QUALIFIER int listening;
@@ -3166,6 +3195,29 @@ BIO *ossl_dtls_listener_get_net_wbio(const SSL *s);
 /* Established connections API - these handle their own locking */
 SSL *ossl_dtls_listener_find_established_conn(DTLS_LISTENER *dl,
     const DGRAM_URXE *urxe);
+/**
+ * @brief Remove a connection's CID from its listener's CID table.
+ * @param s the listener, may be NULL
+ * @param conn the connection
+ */
+void ossl_dtls_listener_unregister_conn_cid(SSL *s, SSL *conn);
+
+/**
+ * @brief Get the CID length a DTLS listener gives its connections.
+ * @param s the listener, may be NULL
+ * @returns the length, 0 if none or if @p s is not a DTLS listener
+ */
+size_t ossl_dtls_listener_cid_len(SSL *s);
+
+/**
+ * @brief Note a verified DTLS record and apply RFC 9146 section 6 to a
+ * change of peer address.
+ * @param s the connection
+ * @param epoch the record's epoch
+ * @param seq the record's sequence number
+ */
+void ossl_dtls_note_record(SSL_CONNECTION *s, uint64_t epoch, uint64_t seq);
+
 void ossl_dtls_listener_unregister_established_conn(SSL *s,
     const BIO_ADDR *peer_addr);
 void ossl_dtls_listener_clear_established_conns(DTLS_LISTENER *dl);
