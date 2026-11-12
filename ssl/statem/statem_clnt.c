@@ -185,6 +185,8 @@ static int ossl_statem_client13_read_transition(SSL_CONNECTION *s, int mt)
         break;
 
     case TLS_ST_CW_KEY_UPDATE:
+    case TLS_ST_CW_NEW_CONNECTION_ID:
+    case TLS_ST_CW_REQUEST_CONNECTION_ID:
     case TLS_ST_CW_FINISHED:
     case TLS_ST_OK:
         if (mt == DTLS13_MT_ACK) {
@@ -198,6 +200,15 @@ static int ossl_statem_client13_read_transition(SSL_CONNECTION *s, int mt)
         }
         if (mt == SSL3_MT_KEY_UPDATE && !SSL_IS_QUIC_HANDSHAKE(s)) {
             st->hand_state = TLS_ST_CR_KEY_UPDATE;
+            return 1;
+        }
+        /* RFC 9147 section 9, DTLS 1.3 post-handshake messages */
+        if (mt == SSL3_MT_NEW_CONNECTION_ID && SSL_CONNECTION_IS_DTLS13(s)) {
+            st->hand_state = TLS_ST_CR_NEW_CONNECTION_ID;
+            return 1;
+        }
+        if (mt == SSL3_MT_REQUEST_CONNECTION_ID && SSL_CONNECTION_IS_DTLS13(s)) {
+            st->hand_state = TLS_ST_CR_REQUEST_CONNECTION_ID;
             return 1;
         }
         if (mt == SSL3_MT_CERTIFICATE_REQUEST) {
@@ -553,6 +564,8 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL_CONNECTION *s)
 
     case TLS_ST_CR_KEY_UPDATE:
     case TLS_ST_CR_SESSION_TICKET:
+    case TLS_ST_CR_NEW_CONNECTION_ID:
+    case TLS_ST_CR_REQUEST_CONNECTION_ID:
         if (SSL_CONNECTION_IS_DTLS13(s)) {
             /*
              * RFC 9147 section 8's restriction is on using the new
@@ -571,6 +584,8 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL_CONNECTION *s)
         }
         /* Fall-through */
     case TLS_ST_CW_KEY_UPDATE:
+    case TLS_ST_CW_NEW_CONNECTION_ID:
+    case TLS_ST_CW_REQUEST_CONNECTION_ID:
     case TLS_ST_CW_FINISHED:
         if (SSL_CONNECTION_IS_DTLS13(s))
             /* We wait for ACK */
@@ -584,6 +599,12 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL_CONNECTION *s)
             && dtls_any_sent_messages_are_missing_acknowledge(s)) {
             /* We wait for ACK */
             return WRITE_TRAN_FINISHED;
+        }
+        /* An answer held back until now, see TLS_ST_CW_ACK below */
+        if (s->ext.dtls_cid.ncid_pending
+            && s->key_update == SSL_KEY_UPDATE_NONE) {
+            st->hand_state = TLS_ST_CW_NEW_CONNECTION_ID;
+            return WRITE_TRAN_CONTINUE;
         }
         st->hand_state = TLS_ST_OK;
         return WRITE_TRAN_CONTINUE;
@@ -604,12 +625,41 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL_CONNECTION *s)
             st->hand_state = TLS_ST_CW_KEY_UPDATE;
             return WRITE_TRAN_FINISHED;
         }
+        /*
+         * "Endpoints MUST NOT have more than one NewConnectionId message
+         * outstanding" (RFC 9147 section 9).  This ACK was for something
+         * else, so go back to waiting; an answer to a RequestConnectionId
+         * goes out once the ACK of ours has come.
+         */
+        if (dtls_has_unacked_message(s, SSL3_MT_NEW_CONNECTION_ID)) {
+            st->hand_state = TLS_ST_CW_NEW_CONNECTION_ID;
+            return WRITE_TRAN_FINISHED;
+        }
+        /*
+         * RFC 9147 section 9: "Endpoints SHOULD respond to
+         * RequestConnectionId by sending a NewConnectionId ... as soon as
+         * possible."  TLS_ST_OK would end the handshake first.
+         */
+        if (s->ext.dtls_cid.ncid_pending) {
+            st->hand_state = TLS_ST_CW_NEW_CONNECTION_ID;
+            return WRITE_TRAN_CONTINUE;
+        }
         st->hand_state = TLS_ST_OK;
         return WRITE_TRAN_CONTINUE;
 
     case TLS_ST_OK:
         if (s->key_update != SSL_KEY_UPDATE_NONE) {
             st->hand_state = TLS_ST_CW_KEY_UPDATE;
+            return WRITE_TRAN_CONTINUE;
+        }
+        if (s->ext.dtls_cid.ncid_pending) {
+            st->hand_state = TLS_ST_CW_NEW_CONNECTION_ID;
+            return dtls_has_unacked_message(s, SSL3_MT_NEW_CONNECTION_ID)
+                ? WRITE_TRAN_FINISHED
+                : WRITE_TRAN_CONTINUE;
+        }
+        if (s->ext.dtls_cid.rcid_num != 0) {
+            st->hand_state = TLS_ST_CW_REQUEST_CONNECTION_ID;
             return WRITE_TRAN_CONTINUE;
         }
 
@@ -1069,6 +1119,13 @@ WORK_STATE ossl_statem_client_post_work(SSL_CONNECTION *s, WORK_STATE wst)
         }
         break;
 
+    case TLS_ST_CW_NEW_CONNECTION_ID:
+    case TLS_ST_CW_REQUEST_CONNECTION_ID:
+        /* Nothing follows them in this flight to push them out */
+        if (statem_flush(s) != 1)
+            return WORK_MORE_A;
+        break;
+
     case TLS_ST_CW_KEY_UPDATE:
         if (statem_flush(s) != 1)
             return WORK_MORE_A;
@@ -1177,6 +1234,16 @@ int ossl_statem_client_construct_message(SSL_CONNECTION *s,
         *mt = SSL3_MT_KEY_UPDATE;
         break;
 
+    case TLS_ST_CW_NEW_CONNECTION_ID:
+        *confunc = tls_construct_new_connection_id;
+        *mt = SSL3_MT_NEW_CONNECTION_ID;
+        break;
+
+    case TLS_ST_CW_REQUEST_CONNECTION_ID:
+        *confunc = tls_construct_request_connection_id;
+        *mt = SSL3_MT_REQUEST_CONNECTION_ID;
+        break;
+
     case TLS_ST_CW_ACK:
         *confunc = dtls_construct_ack;
         *mt = DTLS13_MT_ACK;
@@ -1247,6 +1314,12 @@ size_t ossl_statem_client_max_message_size(SSL_CONNECTION *s)
     case TLS_ST_CR_KEY_UPDATE:
         return KEY_UPDATE_MAX_LENGTH;
 
+    case TLS_ST_CR_NEW_CONNECTION_ID:
+        return NEW_CONNECTION_ID_MAX_LENGTH;
+
+    case TLS_ST_CR_REQUEST_CONNECTION_ID:
+        return REQUEST_CONNECTION_ID_MAX_LENGTH;
+
     case TLS_ST_CR_ACK:
         return ACK_MAX_LENGTH;
     }
@@ -1312,6 +1385,12 @@ MSG_PROCESS_RETURN ossl_statem_client_process_message(SSL_CONNECTION *s,
 
     case TLS_ST_CR_KEY_UPDATE:
         return tls_process_key_update(s, pkt);
+
+    case TLS_ST_CR_NEW_CONNECTION_ID:
+        return tls_process_new_connection_id(s, pkt);
+
+    case TLS_ST_CR_REQUEST_CONNECTION_ID:
+        return tls_process_request_connection_id(s, pkt);
 
     case TLS_ST_CR_ACK:
         return dtls_process_ack(s, pkt);

@@ -1631,6 +1631,8 @@ SSL_R_STREAM_RESET:375:stream reset
 SSL_R_STREAM_SEND_ONLY:379:stream send only
 SSL_R_TLSV13_ALERT_CERTIFICATE_REQUIRED:1116:tlsv13 alert certificate required
 SSL_R_TLSV13_ALERT_MISSING_EXTENSION:1109:tlsv13 alert missing extension
+SSL_R_TLSV13_ALERT_TOO_MANY_CIDS_REQUESTED:1052:\
+	tlsv13 alert too many cids requested
 SSL_R_TLSV1_ALERT_ACCESS_DENIED:1049:tlsv1 alert access denied
 SSL_R_TLSV1_ALERT_DECODE_ERROR:1050:tlsv1 alert decode error
 SSL_R_TLSV1_ALERT_DECRYPTION_FAILED:1021:tlsv1 alert decryption failed

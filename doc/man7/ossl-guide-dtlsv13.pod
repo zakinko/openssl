@@ -230,9 +230,10 @@ downgrade to DTLSv1.2 or earlier.
 Connection IDs (RFC 9147 sections 4 and 9) are supported in DTLSv1.3 as in DTLSv1.2, and
 are enabled with L<SSL_set1_dtls_cid(3)>. A CID is carried in the Unified Header from the
 handshake Epoch on; early data goes without one, being sent before the server's CID is
-known. If a client that supports Connection IDs connects to an OpenSSL server on which
-they are not enabled, the server ignores the extension and includes no Connection ID in
-its records.
+known. The CIDs can be changed after the handshake with NewConnectionId and
+RequestConnectionId messages, see L<SSL_dtls_new_connection_id(3)>. If a client that
+supports Connection IDs connects to an OpenSSL server on which they are not enabled, the
+server ignores the extension and includes no Connection ID in its records.
 
 =head1 CIPHER SUITES
 
