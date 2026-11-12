@@ -384,7 +384,7 @@ int dtls_any_sent_messages_are_missing_acknowledge(SSL_CONNECTION *s)
     return 0;
 }
 
-int dtls_has_unacked_key_update(SSL_CONNECTION *s)
+int dtls_has_unacked_message(SSL_CONNECTION *s, int msg_type)
 {
     pitem *item;
     piterator iter = pqueue_iterator(&s->d1->sent_messages);
@@ -392,12 +392,17 @@ int dtls_has_unacked_key_update(SSL_CONNECTION *s)
     while ((item = pqueue_next(&iter)) != NULL) {
         dtls_sent_msg *msg = (dtls_sent_msg *)item->data;
 
-        if (msg->msg_info.msg_type == SSL3_MT_KEY_UPDATE
+        if (msg->msg_info.msg_type == msg_type
             && !ossl_list_record_number_is_empty(&msg->rec_nums))
             return 1;
     }
 
     return 0;
+}
+
+int dtls_has_unacked_key_update(SSL_CONNECTION *s)
+{
+    return dtls_has_unacked_message(s, SSL3_MT_KEY_UPDATE);
 }
 
 void dtls1_free(SSL *ssl)
@@ -728,6 +733,10 @@ int dtls1_stop_timer_for_read_flight(SSL_CONNECTION *s)
         && (s->statem.hand_state == TLS_ST_SR_KEY_UPDATE
             || s->statem.hand_state == TLS_ST_CR_KEY_UPDATE
             || s->statem.hand_state == TLS_ST_CR_SESSION_TICKET
+            || s->statem.hand_state == TLS_ST_SR_NEW_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_CR_NEW_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_SR_REQUEST_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_CR_REQUEST_CONNECTION_ID
             || (s->statem.hand_state == TLS_ST_CR_CERT_REQ
                 && s->post_handshake_auth == SSL_PHA_REQUESTED))
         && dtls_any_sent_messages_are_missing_acknowledge(s)) {
@@ -3222,6 +3231,46 @@ void ossl_dtls_listener_unregister_conn_cid(SSL *s, SSL *conn)
     ossl_crypto_mutex_lock(dl->mutex);
     ossl_dgram_cid_lookup_unregister_all(dl->cid_conns, &sc->listener_cids);
     ossl_crypto_mutex_unlock(dl->mutex);
+}
+
+void ossl_dtls_listener_remove_conn_cid(SSL *s, SSL *conn,
+    const unsigned char *cid, size_t cid_len)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(conn);
+    DTLS_LISTENER *dl;
+
+    if (s == NULL || !IS_DTLS_LISTENER(s) || sc == NULL)
+        return;
+
+    dl = (DTLS_LISTENER *)s;
+
+    ossl_crypto_mutex_lock(dl->mutex);
+    ossl_dgram_cid_lookup_unregister(dl->cid_conns, cid, cid_len,
+        &sc->listener_cids);
+    ossl_crypto_mutex_unlock(dl->mutex);
+}
+
+int ossl_dtls_listener_add_conn_cid(SSL *s, SSL *conn, const unsigned char *cid,
+    size_t cid_len)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(conn);
+    DTLS_LISTENER *dl;
+    int ok;
+
+    if (s == NULL || !IS_DTLS_LISTENER(s))
+        return 1;
+    if (sc == NULL)
+        return 0;
+
+    dl = (DTLS_LISTENER *)s;
+
+    ossl_crypto_mutex_lock(dl->mutex);
+    ok = dl->cid_len == 0
+        || (cid_len == dl->cid_len
+            && ossl_dgram_cid_lookup_register(dl->cid_conns, cid, cid_len,
+                conn, &sc->listener_cids));
+    ossl_crypto_mutex_unlock(dl->mutex);
+    return ok;
 }
 
 /*

@@ -516,7 +516,14 @@ static int dtls13_plaintext_allows_type(const OSSL_RECORD_LAYER *rl, int type)
 const unsigned char *dtls_cid_is_ours(const OSSL_RECORD_LAYER *rl,
     const unsigned char *cid)
 {
-    return memcmp(cid, rl->cid, rl->cid_len) == 0 ? rl->cid : NULL;
+    size_t i;
+
+    if (memcmp(cid, rl->cid, rl->cid_len) == 0)
+        return rl->cid;
+    for (i = 0; i < rl->cid_more_num; i++)
+        if (memcmp(cid, rl->cid_more + i * rl->cid_len, rl->cid_len) == 0)
+            return rl->cid_more + i * rl->cid_len;
+    return NULL;
 }
 
 /*

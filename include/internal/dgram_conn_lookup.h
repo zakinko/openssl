@@ -116,6 +116,17 @@ int ossl_dgram_cid_lookup_register(DGRAM_CID_LOOKUP *lookup,
     struct dgram_conn_entry_st **list);
 
 /**
+ * @brief Remove one CID of a connection, if it is registered.
+ * @param lookup the table
+ * @param cid the CID bytes
+ * @param cid_len the length of @p cid
+ * @param list the connection's entries
+ */
+void ossl_dgram_cid_lookup_unregister(DGRAM_CID_LOOKUP *lookup,
+    const unsigned char *cid, size_t cid_len,
+    struct dgram_conn_entry_st **list);
+
+/**
  * @brief Remove every CID a connection is registered under.
  * @param lookup the table
  * @param list the connection's entries

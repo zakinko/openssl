@@ -35,6 +35,12 @@
 #define SERVER_KEY_EXCH_MAX_LENGTH 102400
 #define SERVER_HELLO_DONE_MAX_LENGTH 0
 #define KEY_UPDATE_MAX_LENGTH 1
+/*
+ * RFC 9147 section 9: "ConnectionId cids<0..2^16-1>; ConnectionIdUsage
+ * usage;" and "uint8 num_cids;"
+ */
+#define NEW_CONNECTION_ID_MAX_LENGTH (2 + 65535 + 1)
+#define REQUEST_CONNECTION_ID_MAX_LENGTH 1
 #define CCS_MAX_LENGTH 1
 #define ACK_MAX_LENGTH 65538
 
@@ -148,6 +154,43 @@ __owur CON_FUNC_RETURN dtls_construct_ack(SSL_CONNECTION *s, WPACKET *pkt);
 __owur CON_FUNC_RETURN tls_construct_finished(SSL_CONNECTION *s, WPACKET *pkt);
 __owur CON_FUNC_RETURN tls_construct_key_update(SSL_CONNECTION *s, WPACKET *pkt);
 __owur MSG_PROCESS_RETURN tls_process_key_update(SSL_CONNECTION *s,
+    PACKET *pkt);
+
+/**
+ * @brief Write a DTLS 1.3 NewConnectionId message (RFC 9147 section 9).
+ * @param s the connection
+ * @param pkt the message body
+ * @returns CON_FUNC_SUCCESS or CON_FUNC_ERROR (SSLfatal() called)
+ */
+__owur CON_FUNC_RETURN tls_construct_new_connection_id(SSL_CONNECTION *s,
+    WPACKET *pkt);
+
+/**
+ * @brief Write a DTLS 1.3 RequestConnectionId message (RFC 9147 section 9).
+ * @param s the connection
+ * @param pkt the message body
+ * @returns CON_FUNC_SUCCESS or CON_FUNC_ERROR (SSLfatal() called)
+ */
+__owur CON_FUNC_RETURN tls_construct_request_connection_id(SSL_CONNECTION *s,
+    WPACKET *pkt);
+
+/**
+ * @brief Process a DTLS 1.3 NewConnectionId message (RFC 9147 section 9).
+ * @param s the connection
+ * @param pkt the message body
+ * @returns MSG_PROCESS_FINISHED_READING or MSG_PROCESS_ERROR
+ */
+__owur MSG_PROCESS_RETURN tls_process_new_connection_id(SSL_CONNECTION *s,
+    PACKET *pkt);
+
+/**
+ * @brief Process a DTLS 1.3 RequestConnectionId message (RFC 9147
+ * section 9).
+ * @param s the connection
+ * @param pkt the message body
+ * @returns MSG_PROCESS_FINISHED_READING or MSG_PROCESS_ERROR
+ */
+__owur MSG_PROCESS_RETURN tls_process_request_connection_id(SSL_CONNECTION *s,
     PACKET *pkt);
 __owur WORK_STATE tls_finish_handshake(SSL_CONNECTION *s, WORK_STATE wst,
     int clearbufs, int stop);
