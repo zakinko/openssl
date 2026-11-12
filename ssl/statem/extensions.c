@@ -88,6 +88,7 @@ static int init_srp(SSL_CONNECTION *s, unsigned int context);
 static int init_ec_point_formats(SSL_CONNECTION *s, unsigned int context);
 static int init_etm(SSL_CONNECTION *s, unsigned int context);
 static int init_connection_id(SSL_CONNECTION *s, unsigned int context);
+static int init_rrc(SSL_CONNECTION *s, unsigned int context);
 static int init_ems(SSL_CONNECTION *s, unsigned int context);
 static int final_ems(SSL_CONNECTION *s, unsigned int context, int sent);
 static int init_psk_kex_modes(SSL_CONNECTION *s, unsigned int context);
@@ -330,6 +331,16 @@ static const EXTENSION_DEFINITION ext_defs[] = {
         init_connection_id, tls_parse_ctos_connection_id,
         tls_parse_stoc_connection_id, tls_construct_stoc_connection_id,
         tls_construct_ctos_connection_id, NULL },
+    /*
+     * RFC 9853 section 3: ClientHello and ServerHello, DTLS only.  It must
+     * come after connection_id, which the server's answer depends on.
+     */
+    { TLSEXT_TYPE_rrc,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
+            | SSL_EXT_DTLS_ONLY | SSL_EXT_TLS1_2_AND_BELOW_ONLY,
+        OSSL_ECH_HANDLING_COMPRESS,
+        init_rrc, tls_parse_ctos_rrc, tls_parse_stoc_rrc,
+        tls_construct_stoc_rrc, tls_construct_ctos_rrc, NULL },
 #ifndef OPENSSL_NO_CT
     { TLSEXT_TYPE_signed_certificate_timestamp,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
@@ -1610,6 +1621,15 @@ static int init_connection_id(SSL_CONNECTION *s, unsigned int context)
     OPENSSL_free(s->ext.dtls_cid.peer);
     s->ext.dtls_cid.peer = NULL;
     s->ext.dtls_cid.peer_len = 0;
+
+    return 1;
+}
+
+/* RFC 9853 section 3: negotiated afresh with the "connection_id" extension */
+static int init_rrc(SSL_CONNECTION *s, unsigned int context)
+{
+    s->ext.dtls_cid.rrc_received = 0;
+    s->ext.dtls_cid.rrc_negotiated = 0;
 
     return 1;
 }

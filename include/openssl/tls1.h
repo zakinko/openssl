@@ -164,6 +164,9 @@ extern "C" {
 /* ExtensionType value from RFC9146 */
 #define TLSEXT_TYPE_connection_id 54
 
+/* ExtensionType value from RFC9853 */
+#define TLSEXT_TYPE_rrc 61
+
 #define TLSEXT_TYPE_quic_transport_parameters 57
 
 /* Temporary extension type */

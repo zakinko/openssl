@@ -220,6 +220,7 @@ extern "C" {
 #define SSL3_RT_APPLICATION_DATA 23
 #define SSL3_RT_TLS12_CID 25 /* RFC 9146 */
 #define SSL3_RT_ACK 26 /* RFC 9147 */
+#define SSL3_RT_RETURN_ROUTABILITY_CHECK 27 /* RFC 9853 */
 
 /* Pseudo content types to indicate additional parameters */
 #define TLS1_RT_CRYPTO 0x1000

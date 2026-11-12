@@ -54,6 +54,7 @@ static EXT_LIST ext_list[] = {
 #endif
     EXT_ENTRY(encrypt_then_mac),
     EXT_ENTRY(connection_id),
+    EXT_ENTRY(rrc),
 #ifndef OPENSSL_NO_CT
     EXT_ENTRY(signed_certificate_timestamp),
 #else
