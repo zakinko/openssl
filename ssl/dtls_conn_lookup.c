@@ -628,18 +628,21 @@ void ossl_dgram_cid_lookup_unregister_ssl(DGRAM_CID_LOOKUP *lookup, SSL *ssl)
         return;
 
     /*
-     * A connection has one CID at most; look it up by the connection, so
-     * that none of the paths that free a connection has to remember it.  An
-     * LHASH entry cannot be deleted inside doall, hence the two steps.
+     * Look the CIDs up by the connection, so that none of the paths that
+     * free a connection has to remember them.  A DTLS 1.3 connection can
+     * have more than one (RFC 9147 section 9).  An LHASH entry cannot be
+     * deleted inside doall, hence one at a time.
      */
-    ctx.ssl = ssl;
-    ctx.found = NULL;
-    lh_DGRAM_CONN_ENTRY_doall_void(lookup->htable, cid_find_ssl_cb, &ctx);
-    if (ctx.found == NULL)
-        return;
+    for (;;) {
+        ctx.ssl = ssl;
+        ctx.found = NULL;
+        lh_DGRAM_CONN_ENTRY_doall_void(lookup->htable, cid_find_ssl_cb, &ctx);
+        if (ctx.found == NULL)
+            return;
 
-    removed = lh_DGRAM_CONN_ENTRY_delete(lookup->htable, ctx.found);
-    conn_entry_free(removed);
+        removed = lh_DGRAM_CONN_ENTRY_delete(lookup->htable, ctx.found);
+        conn_entry_free(removed);
+    }
 }
 
 size_t ossl_dgram_cid_lookup_num_items(const DGRAM_CID_LOOKUP *lookup)

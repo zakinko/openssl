@@ -154,11 +154,14 @@ int tls_setup_write_buffer(OSSL_RECORD_LAYER *rl, size_t numwpipes,
             contenttypelen = 1;
 
         /*
-         * A DTLS 1.2 record with a Connection ID has it in its header, and
-         * the content type after the payload as well (RFC 9146 section 4).
+         * A DTLS record with a Connection ID has it in its header, and in
+         * DTLS 1.2 the content type after the payload as well (RFC 9146
+         * section 4, RFC 9147 section 4).  The peer picks the CID, and in
+         * DTLS 1.3 may give another of any length later (RFC 9147 section
+         * 9), so leave room for the longest.
          */
         if (rl->isdtls && rl->cid_len != 0) {
-            headerlen += rl->cid_len;
+            headerlen += SSL_DTLS_CID_MAX_LEN;
             contenttypelen = 1;
         }
 
@@ -240,7 +243,7 @@ int tls_setup_read_buffer(OSSL_RECORD_LAYER *rl)
     headerlen = tls_get_record_header_len(rl);
     /* The CID we are sent is part of the record header, see above */
     if (rl->isdtls)
-        headerlen += rl->cid_len;
+        headerlen += rl->cid_len != 0 ? rl->cid_len : rl->frame_cid_len;
 
 #if defined(SSL3_ALIGN_PAYLOAD) && SSL3_ALIGN_PAYLOAD != 0
     maxalign = SSL3_ALIGN_PAYLOAD - 1;
@@ -1067,7 +1070,14 @@ int tls13_common_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec)
     if (rec->type != SSL3_RT_APPLICATION_DATA
         && rec->type != SSL3_RT_ALERT
         && rec->type != SSL3_RT_HANDSHAKE
-        && (!rl->isdtls || rec->type != SSL3_RT_ACK)) {
+        /*
+         * RFC 9853 section 4 adds return_routability_check to the content
+         * types of DTLS 1.3 as well; whether RRC was negotiated is for
+         * the layer above to say.
+         */
+        && (!rl->isdtls
+            || (rec->type != SSL3_RT_ACK
+                && rec->type != SSL3_RT_RETURN_ROUTABILITY_CHECK))) {
         RLAYERfatal(rl, SSL_AD_UNEXPECTED_MESSAGE, SSL_R_BAD_RECORD_TYPE);
         return 0;
     }
@@ -1199,7 +1209,64 @@ int tls_set_options(OSSL_RECORD_LAYER *rl, const OSSL_PARAM *options)
             ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
             return 0;
         }
+        /* Our CID, to frame later epochs' records with (frame_cid) */
+        p = prms.cid;
+        if (p != NULL && rl->cid_len == 0) {
+            void *cid = NULL;
+            size_t len = 0;
+
+            if (!OSSL_PARAM_get_octet_string(p, &cid, 0, &len)
+                || len > SSL_DTLS_CID_MAX_LEN) {
+                OPENSSL_free(cid);
+                ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
+                return 0;
+            }
+            OPENSSL_free(rl->frame_cid);
+            rl->frame_cid = cid;
+            rl->frame_cid_len = len;
+        }
+        /*
+         * The further CIDs of our own the peer may use (RFC 9147 section
+         * 9), all of the record layer's CID length.
+         */
+        p = prms.cidmore;
+        if (p != NULL) {
+            void *more = NULL;
+            size_t len = 0;
+
+            if (rl->cid_len == 0
+                || !OSSL_PARAM_get_octet_string(p, &more, 0, &len)
+                || len % rl->cid_len != 0) {
+                OPENSSL_free(more);
+                ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
+                return 0;
+            }
+            OPENSSL_free(rl->cid_more);
+            rl->cid_more = more;
+            rl->cid_more_num = len / rl->cid_len;
+        }
     } else {
+        /*
+         * The CID records are written with, when the peer has given a new
+         * one (RFC 9147 section 9, "cid_immediate").  Only a record layer
+         * that writes a CID already changes it.
+         */
+        p = prms.cid;
+        if (p != NULL) {
+            void *cid = NULL;
+            size_t len = 0;
+
+            if (rl->cid_len == 0
+                || !OSSL_PARAM_get_octet_string(p, &cid, 0, &len)
+                || len == 0 || len > SSL_DTLS_CID_MAX_LEN) {
+                OPENSSL_free(cid);
+                ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
+                return 0;
+            }
+            OPENSSL_free(rl->cid);
+            rl->cid = cid;
+            rl->cid_len = len;
+        }
         p = prms.blockpad;
         if (p != NULL && !OSSL_PARAM_get_size_t(p, &rl->block_padding)) {
             ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
@@ -1476,6 +1543,8 @@ static void tls_int_free(OSSL_RECORD_LAYER *rl)
     OPENSSL_free(rl->iv);
     OPENSSL_free(rl->nonce);
     OPENSSL_free(rl->cid);
+    OPENSSL_free(rl->frame_cid);
+    OPENSSL_free(rl->cid_more);
     OPENSSL_cleanse(rl->cid_iv, sizeof(rl->cid_iv));
 
     TLS_RL_RECORD_release(rl->rrec, SSL_MAX_PIPELINES);
@@ -1758,10 +1827,13 @@ int tls_post_encryption_processing_default(OSSL_RECORD_LAYER *rl,
 
     if (rl->isdtls && DTLS13_UNI_HDR_FIX_BITS_IS_SET(*recordstart)) {
         size_t seqnumlen = DTLS13_UNI_HDR_SEQ_BIT_IS_SET(*recordstart) ? 2 : 1;
+        /* RFC 9147 section 4, Figure 3: the sequence number follows any CID */
+        size_t seqoff = DTLS13_UNI_HDR_SEQ_OFF
+            + (DTLS13_UNI_HDR_CID_BIT_IS_SET(*recordstart) ? rl->cid_len : 0);
 
-        if (!ossl_assert(DTLS13_UNI_HDR_SEQ_OFF + seqnumlen <= rechdrlen)
+        if (!ossl_assert(seqoff + seqnumlen <= rechdrlen)
             || (rl->sn_enc_ctx != NULL
-                && !dtls_crypt_sequence_number(rl->sn_enc_ctx, recordstart + DTLS13_UNI_HDR_SEQ_OFF,
+                && !dtls_crypt_sequence_number(rl->sn_enc_ctx, recordstart + seqoff,
                     seqnumlen, recordstart + rechdrlen))) {
             RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
             return 0;

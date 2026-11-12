@@ -997,8 +997,12 @@ err:
 
 int tls13_alert_code(int code)
 {
-    /* There are 2 additional alerts in TLSv1.3 compared to TLSv1.2 */
-    if (code == SSL_AD_MISSING_EXTENSION || code == SSL_AD_CERTIFICATE_REQUIRED)
+    /*
+     * There are 2 additional alerts in TLSv1.3 compared to TLSv1.2, and one in
+     * DTLSv1.3 (RFC 9147 section 9)
+     */
+    if (code == SSL_AD_MISSING_EXTENSION || code == SSL_AD_CERTIFICATE_REQUIRED
+        || code == SSL_AD_TOO_MANY_CIDS_REQUESTED)
         return code;
 
     return tls1_alert_code(code);
