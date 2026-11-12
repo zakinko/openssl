@@ -19,6 +19,7 @@ SSL_VALUE_QUIC_MAX_PENDING_CONNS,
 SSL_VALUE_DTLS_LISTENER_MAX_PENDING_CONNS,
 SSL_VALUE_DTLS_LISTENER_PENDING_TIMEOUT,
 SSL_VALUE_DTLS_LISTENER_MAX_DGRAM_SIZE,
+SSL_VALUE_DTLS_LISTENER_CID_LEN,
 SSL_VALUE_EVENT_HANDLING_MODE,
 SSL_VALUE_EVENT_HANDLING_MODE_INHERIT,
 SSL_VALUE_EVENT_HANDLING_MODE_EXPLICIT,
@@ -63,6 +64,7 @@ manage negotiable features and configuration values for an SSL object
  #define SSL_VALUE_DTLS_LISTENER_MAX_PENDING_CONNS
  #define SSL_VALUE_DTLS_LISTENER_PENDING_TIMEOUT
  #define SSL_VALUE_DTLS_LISTENER_MAX_DGRAM_SIZE
+ #define SSL_VALUE_DTLS_LISTENER_CID_LEN
 
  #define SSL_VALUE_EVENT_HANDLING_MODE
  #define SSL_VALUE_EVENT_HANDLING_MODE_INHERIT
@@ -444,6 +446,17 @@ received whole rather than truncated. Deployments over a transport with a
 larger MTU (for example jumbo frames) may raise it. Values are clamped to 65535
 (the maximum UDP payload), and values below the minimum receive size (1200) are
 rejected.
+
+=item B<SSL_VALUE_DTLS_LISTENER_CID_LEN> (DTLS listener object)
+
+Generic value. The length in bytes of the DTLS 1.2 Connection ID (RFC 9146)
+that the listener gives each connection it creates, from 1 to
+B<SSL_DTLS_CID_MAX_LEN>; 0, the default, gives none. A connection whose client
+negotiates the "connection_id" extension then receives records carrying that
+CID, and the listener routes such records by the CID rather than by the
+address they came from, so the connection survives a change of the client's
+address. The CIDs are random. The length cannot be changed while connections
+that have a CID exist. See L<SSL_set1_dtls_cid(3)>.
 
 =back
 
