@@ -123,6 +123,16 @@ my $guess_patterns = [
       }
     ],
     [ 'DragonFly:.*',               '${MACHINE}-whatever-dragonfly' ],
+    # On these ports uname -m names the port, not the processor; the
+    # 32-bit processors keep the port name, as before
+    [ 'FreeBSD:.*?:.*?:(powerpc|riscv)',
+      sub {
+          my $arch = `uname -p`;
+          chomp $arch;
+          $arch = $MACHINE unless $arch =~ m@64@;
+          return "${arch}-whatever-freebsd";
+      }
+    ],
     [ 'FreeBSD:.*',                 '${MACHINE}-whatever-freebsd' ],
     [ 'Haiku:.*',                   '${MACHINE}-whatever-haiku' ],
     # Order is important, this has to appear before 'NetBSD:.*'
@@ -131,6 +141,16 @@ my $guess_patterns = [
           my $hw = `/usr/sbin/sysctl -n hw.model || /sbin/sysctl -n hw.model`;
           $hw =~  s@.*(.)86-class.*@i${1}86@;
           return "${hw}-whatever-netbsd";
+      }
+    ],
+    # On these ports uname -m names the port, not the processor; the
+    # 32-bit processors keep the port name, as before
+    [ 'NetBSD:.*?:.*?:(evbarm|riscv)',
+      sub {
+          my $arch = `uname -p`;
+          chomp $arch;
+          $arch = $MACHINE unless $arch =~ m@64@;
+          return "${arch}-whatever-netbsd";
       }
     ],
     [ 'NetBSD:.*',                  '${MACHINE}-whatever-netbsd' ],
@@ -802,6 +822,7 @@ EOF
       [ 'amd64-.*-openbsd.*',     { target => "BSD-nodef-x86_64" } ],
       [ 'amd64-.*-.*bsd.*',       { target => "BSD-x86_64" } ],
       [ 'arm64-.*-.*bsd.*',       { target => "BSD-aarch64" } ],
+      [ 'aarch64-.*-netbsd.*',    { target => "BSD-aarch64" } ],
       [ 'armv6-.*-.*bsd.*',       { target => "BSD-armv4" } ],
       [ 'armv7-.*-.*bsd.*',       { target => "BSD-armv4" } ],
       [ '.*86.*-.*-.*bsd.*',
