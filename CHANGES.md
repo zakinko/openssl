@@ -37,6 +37,11 @@ OpenSSL 4.2
 
    *Filip Skokan*
 
+ * Added support for Connection IDs in DTLS 1.3 ([RFC 9147]): the CID in
+   the unified header.
+
+   *Showta Ishizaki*
+
  * Added the Return Routability Check ([RFC 9853]) for DTLS connections
    with a Connection ID.  A connection of a DTLS listener whose peer
    changes address sends a path_challenge to the new address and moves

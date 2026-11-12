@@ -409,7 +409,10 @@ static int mempacket_test_read(BIO *bio, char *out, int outl)
             unsigned int rechdrlen;
 
             if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(*rec))
-                rechdrlen = DTLS13_UNI_HDR_FIXED_LENGTH;
+                rechdrlen = DTLS13_UNI_HDR_FIXED_LENGTH
+                    + (DTLS13_UNI_HDR_CID_BIT_IS_SET(*rec)
+                            ? (unsigned int)ctx->cidlen
+                            : 0);
             else if (*rec == SSL3_RT_TLS12_CID && ctx->cidlen != 0)
                 /* RFC 9146 section 4, Figure 3: the CID before the length */
                 rechdrlen = DTLS1_RT_HEADER_LENGTH + (unsigned int)ctx->cidlen;
@@ -440,8 +443,7 @@ static int mempacket_test_read(BIO *bio, char *out, int outl)
             }
 
             if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(*rec))
-                len = (rec[DTLS13_UNI_HDR_RECORD_LEN_HI] << 8)
-                    | rec[DTLS13_UNI_HDR_RECORD_LEN_LO];
+                len = (rec[rechdrlen - 2] << 8) | rec[rechdrlen - 1];
             else
                 len = (rec[rechdrlen - 2] << 8) | rec[rechdrlen - 1];
 
@@ -914,13 +916,20 @@ int mempacket_test_inject(BIO *bio, const char *in, int inl, int pktnum,
     size_t len;
 
     if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(*in)
-        /* The following code does not handle connection ids */
-        && ossl_assert(!DTLS13_UNI_HDR_CID_BIT_IS_SET(*in))) {
+        /* A CID can only be framed with its length set on the BIO */
+        && (!DTLS13_UNI_HDR_CID_BIT_IS_SET(*in)
+            || (ctx != NULL && ctx->cidlen != 0))) {
+        /* RFC 9147 section 4, Figure 3: any CID follows the first byte */
+        size_t cid = DTLS13_UNI_HDR_CID_BIT_IS_SET(*in) ? ctx->cidlen : 0;
+
         if (DTLS13_UNI_HDR_LEN_BIT_IS_SET(*in)) {
+            if ((size_t)inl < DTLS13_UNI_HDR_RECORD_LEN_LO + 1 + cid)
+                return -1;
             len = 3; /* 2 bytes for len field and 1 byte for record type */
             len += DTLS13_UNI_HDR_SEQ_BIT_IS_SET(*in) ? 2 : 1;
-            len += ((inu[DTLS13_UNI_HDR_RECORD_LEN_HI] << 8)
-                | inu[DTLS13_UNI_HDR_RECORD_LEN_LO]);
+            len += cid;
+            len += ((inu[DTLS13_UNI_HDR_RECORD_LEN_HI + cid] << 8)
+                | inu[DTLS13_UNI_HDR_RECORD_LEN_LO + cid]);
         } else {
             /* We assert that inl is the correct record length */
             len = inl;

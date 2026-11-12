@@ -74,6 +74,12 @@ typedef struct tls_rl_record_st {
     /* sequence number, needed by DTLS1 */
     /* r */
     uint64_t seq_num;
+    /*
+     * The CID a received DTLS 1.3 record carried, pointing into the record
+     * layer's |cid|; NULL when it had none
+     */
+    /* r */
+    const unsigned char *cid;
 } TLS_RL_RECORD;
 
 /* Macros/functions provided by the TLS_RL_RECORD component */
@@ -339,6 +345,19 @@ struct ossl_record_layer_st {
      */
     unsigned char *cid;
     size_t cid_len;
+    /*
+     * A read record layer made before the CID was negotiated (DTLS 1.3
+     * epoch 0) gets the CID we sent here, only to find the end of the
+     * records of later epochs that it keeps for the next record layer
+     * (see dtls_get_more_records()).  Nothing is decrypted with it.
+     */
+    unsigned char *frame_cid;
+    size_t frame_cid_len;
+    /*
+     * Set once a record of the datagram being read has carried our CID: RFC
+     * 9147 section 4 wants the CID in every datagram, not in every record.
+     */
+    unsigned int dgram_has_cid : 1;
     unsigned char cid_iv[EVP_MAX_IV_LENGTH];
     size_t cid_ivlen;
 
@@ -527,6 +546,16 @@ int dtls_cid_add_record_padding(OSSL_RECORD_LAYER *rl,
  * @returns 1 on success, 0 on error (RLAYERfatal() called)
  */
 int dtls_cid_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec);
+
+/**
+ * @brief Is @p cid, of the record layer's CID length, the CID a read record
+ * layer accepts?
+ * @param rl the read record layer
+ * @param cid the CID in a record
+ * @returns the CID of ours, or NULL if @p cid is not it
+ */
+const unsigned char *dtls_cid_is_ours(const OSSL_RECORD_LAYER *rl,
+    const unsigned char *cid);
 int dtls_crypt_sequence_number(EVP_CIPHER_CTX *ctx, unsigned char *seq, size_t seqlen,
     unsigned char *rec_data);
 int dtls_get_more_records(OSSL_RECORD_LAYER *rl);

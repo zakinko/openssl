@@ -10,7 +10,7 @@ SSL_get_dtls_rrc,
 SSL_CTX_set_dtls_peer_addr_change_cb,
 SSL_dtls_peer_addr_change_cb_fn,
 SSL_DTLS_CID_MAX_LEN
-- DTLS 1.2 Connection ID
+- DTLS Connection ID
 
 =head1 SYNOPSIS
 
@@ -41,9 +41,9 @@ A Connection ID (CID) is an identifier carried in every protected DTLS record
 of a connection. A receiver that finds its connections by the CID rather than
 by the address and port of the sender keeps a connection when the peer's
 address changes, for example after a NAT rebinding. OpenSSL implements the
-"connection_id" extension and the record format of RFC 9146 for DTLS 1.2.
-The use of Connection IDs in DTLS 1.3 (RFC 9147) is not implemented, and the
-extension is not negotiated in DTLS 1.3.
+"connection_id" extension and the record format of RFC 9146 for DTLS 1.2, and
+the use of Connection IDs in DTLS 1.3 described in RFC 9147, where the CID is
+carried in the unified header from the handshake Epoch on.
 
 Each side of a connection chooses the CID it wants to find in the records it
 receives, and sends it to the peer in the extension; the peer puts it in every
@@ -136,6 +136,10 @@ listener, OpenSSL does not change the address it sends to. Note however that
 a L<BIO_s_datagram(3)> whose socket is not connected sends to the source
 address of the last datagram it received, before OpenSSL has checked it, which
 RFC 9146 section 6 forbids; use a listener, or a connected socket.
+
+A DTLS 1.3 client that does not want to receive a CID should still offer the
+extension, with an empty one (RFC 9147 section 5.3). OpenSSL does not do so by
+itself; call SSL_set1_dtls_cid() with I<cid_len> 0 for that.
 
 The CID is visible on the wire and identifies the connection for as long as
 it lasts. RFC 9146 section 8 discusses the privacy implications.
