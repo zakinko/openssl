@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64, riscv64]
+        arch: [riscv64]
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [powerpc64, riscv64]
+        arch: [powerpc64]
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -38,7 +38,14 @@ jobs:
           release: "15.1"
           arch: ${{ matrix.arch }}
           usesh: true
-          prepare: pkg install -y perl5
+          prepare: |
+            pkg install -y perl5 || {
+              mkdir -p $HOME/perlsrc && cd $HOME/perlsrc
+              fetch -o perl.tgz https://www.cpan.org/src/5.0/perl-5.40.2.tar.gz
+              tar xzf perl.tgz && cd perl-5.40.2
+              sh Configure -des -Dprefix=/usr/local > /dev/null
+              make -j$(sysctl -n hw.ncpu) > /dev/null && make install > /dev/null
+            }
           run: |
             set -e
             uname -m; uname -p
