@@ -866,7 +866,7 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
 #define SSL_DTLS_CID_MAX_LEN 255
 
 /**
- * @brief Enable the DTLS 1.2 "connection_id" extension and set the CID to
+ * @brief Enable the DTLS "connection_id" extension and set the CID to
  * receive.
  * @param s the DTLS connection
  * @param cid the CID the peer is asked to use when sending, or NULL
@@ -878,7 +878,7 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
 __owur int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len);
 
 /**
- * @brief Disable the DTLS 1.2 "connection_id" extension from the next
+ * @brief Disable the DTLS "connection_id" extension from the next
  * handshake on.
  * @param s the DTLS connection
  * @see SSL_clear_dtls_cid(3)

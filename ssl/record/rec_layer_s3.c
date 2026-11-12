@@ -1479,10 +1479,16 @@ int ssl_set_new_record_layer(SSL_CONNECTION *s, int version,
      * direction, records in that direction use the tls12_cid format "once
      * encryption is enabled"; "Plaintext payloads never use the new record
      * format".  The CID read is the one we sent in our extension, the CID
-     * written the one from the peer's.
+     * written the one from the peer's.  In DTLS 1.3 the CID is negotiated
+     * in the hellos and carried from the handshake epoch on (RFC 9147
+     * section 9.1, Figure 15); early data goes before the server's CID is
+     * known and has none.
      */
-    if (SSL_CONNECTION_IS_DTLS(s) && version != DTLS1_3_VERSION
-        && level == OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
+    if (SSL_CONNECTION_IS_DTLS(s)
+        && (version == DTLS1_3_VERSION
+                ? level == OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
+                    || level == OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
+                : level == OSSL_RECORD_PROTECTION_LEVEL_APPLICATION)
         && s->ext.dtls_cid.negotiated) {
         unsigned char *cid;
         size_t cid_len;
