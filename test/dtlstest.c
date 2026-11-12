@@ -3778,6 +3778,78 @@ end:
 }
 
 /*
+ * RFC 9853 section 3: "If the client includes the rrc extension in its
+ * ClientHello but omits the connection_id extension, the server MUST NOT
+ * include the rrc extension in its ServerHello."  OpenSSL does not send such
+ * a ClientHello, so one is made by giving the connection_id extension another
+ * type on the way.
+ *   0: that ClientHello
+ *   1: the ClientHello as it is, which does get the answer
+ */
+static int test_dtls_rrc_without_cid(int idx)
+{
+    /* "connection_id" (54) with cid_client */
+    static const unsigned char cidext[] = {
+        0x00, 0x36, 0x00, 0x05, 0x04, 0xc1, 0xc2, 0xc3, 0xc4
+    };
+    /* "rrc" (61), empty */
+    static const unsigned char rrcext[] = { 0x00, 0x3d, 0x00, 0x00 };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    SSL_CONNECTION *ssc;
+    unsigned char pkt[2048];
+    int len, i, ret, found = 0, testresult = 0;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_true(cid_dgram_pair_objects(sctx, cctx, &sssl, &cssl))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client)))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server)))
+        || !TEST_ptr(ssc = SSL_CONNECTION_FROM_SSL_ONLY(sssl)))
+        goto end;
+    SSL_set_connect_state(cssl);
+    SSL_set_accept_state(sssl);
+    if (!TEST_int_le(ret = SSL_do_handshake(cssl), 0)
+        || !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ)
+        || !TEST_int_gt(len = BIO_read(SSL_get_rbio(sssl), pkt, sizeof(pkt)), 0))
+        goto end;
+    for (i = 0; i + (int)sizeof(cidext) <= len; i++) {
+        if (memcmp(pkt + i, cidext, sizeof(cidext)) == 0) {
+            found++;
+            if (idx == 0)
+                pkt[i] = pkt[i + 1] = 0xfa;
+        }
+    }
+    if (!TEST_int_eq(found, 1)
+        || !TEST_int_eq(BIO_write(SSL_get_wbio(cssl), pkt, len), len)
+        || !TEST_int_le(ret = SSL_do_handshake(sssl), 0)
+        || !TEST_int_eq(SSL_get_error(sssl, ret), SSL_ERROR_WANT_READ)
+        || !TEST_true(ssc->ext.dtls_cid.rrc_received)
+        || !TEST_int_eq(ssc->ext.dtls_cid.rrc_negotiated, idx)
+        || !TEST_int_gt(len = BIO_read(SSL_get_rbio(cssl), pkt, sizeof(pkt)), 0)
+        || !TEST_int_gt(len, DTLS1_RT_HEADER_LENGTH)
+        || !TEST_int_eq(pkt[DTLS1_RT_HEADER_LENGTH], SSL3_MT_SERVER_HELLO))
+        goto end;
+    /* the ServerHello message only */
+    if (!TEST_int_ge(len, DTLS1_RT_HEADER_LENGTH + (pkt[11] << 8) + pkt[12]))
+        goto end;
+    len = DTLS1_RT_HEADER_LENGTH + (pkt[11] << 8) + pkt[12];
+    for (i = 0, found = 0; i + (int)sizeof(rrcext) <= len; i++)
+        found += memcmp(pkt + i, rrcext, sizeof(rrcext)) == 0;
+    if (!TEST_int_eq(found, idx))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/*
  * CIDs of the longest length in both directions and, each way, a record of
  * 2^14 - 1 bytes, the most a DTLS 1.2 record with a CID carries: the record
  * buffers have to take the CID on top of the rest.  |cipher| is for DTLS 1.2.
@@ -3969,6 +4041,7 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_dtls_cid_long, 2);
     ADD_ALL_TESTS(test_dtls_cid_bad_inner, 3);
     ADD_ALL_TESTS(test_dtls_cid_afresh, 4);
+    ADD_ALL_TESTS(test_dtls_rrc_without_cid, 2);
     ADD_TEST(test_dtls_cid_api);
 #endif
 
