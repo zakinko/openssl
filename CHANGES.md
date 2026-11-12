@@ -33,6 +33,14 @@ OpenSSL 4.2
 
 ### Changes between 4.1 and 4.2 [xx XXX xxxx]
 
+ * Added the Return Routability Check ([RFC 9853]) for DTLS connections
+   with a Connection ID.  A connection of a DTLS listener whose peer
+   changes address sends a path_challenge to the new address and moves
+   there when it is answered.  It is negotiated by default with the
+   Connection ID; see `SSL_set_dtls_rrc()`.
+
+   *Showta Ishizaki*
+
  * DTLS listeners can give their connections a Connection ID and find them
    by it, so that a connection survives a change of the client's address.
    See `SSL_VALUE_DTLS_LISTENER_CID_LEN` in `SSL_get_value_uint(3)` and
@@ -24712,6 +24720,7 @@ ndif
 [RFC 9000]: https://datatracker.ietf.org/doc/html/rfc9000
 [RFC 9146]: https://datatracker.ietf.org/doc/html/rfc9146
 [RFC 9147]: https://datatracker.ietf.org/doc/html/rfc9147
+[RFC 9853]: https://datatracker.ietf.org/doc/html/rfc9853
 [RFC 9149]: https://datatracker.ietf.org/doc/html/rfc9149
 [RFC 9846]: https://datatracker.ietf.org/doc/html/rfc9846
 [RFC 9846 Section 4.3.10]: https://datatracker.ietf.org/doc/html/rfc9846#section-4.3.10

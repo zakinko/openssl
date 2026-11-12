@@ -3095,6 +3095,152 @@ static int dtls_addr_equal(const BIO_ADDR *a, const BIO_ADDR *b)
     return memcmp(ra, rb, la) == 0;
 }
 
+/* RFC 9853 section 4, Figure 1 */
+#define DTLS_RRC_PATH_CHALLENGE 0
+#define DTLS_RRC_PATH_RESPONSE 1
+#define DTLS_RRC_PATH_DROP 2
+/* "Each message carries a Cookie, an 8-byte field" */
+#define DTLS_RRC_COOKIE_LEN 8
+/*
+ * RFC 9853 section 5.5: "If an implementation has no way to obtain
+ * information regarding the RTT of the active path, T SHOULD be set to 1
+ * second."
+ */
+#define DTLS_RRC_TIMEOUT_MS 1000
+
+static void dtls_move_peer(SSL_CONNECTION *s, const BIO_ADDR *new_addr);
+
+/*
+ * Send a return_routability_check message to |to|, or where the connection
+ * sends if |to| is NULL.  A listener's connections share the listener's BIO
+ * and pass each record's address to it, so a message for another address is
+ * sent with the record layer pointed there for the one write.  The message
+ * "MUST be authenticated and encrypted using the currently active security
+ * context" (section 4), which do_dtls1_write() does once there is one: a
+ * DTLS 1.2 server that has read the client's Finished still writes epoch 0
+ * until its own ChangeCipherSpec, and nothing is sent then.
+ */
+static int dtls_rrc_send(SSL_CONNECTION *s, unsigned char msg_type,
+    const unsigned char *cookie, const BIO_ADDR *to)
+{
+    unsigned char msg[1 + DTLS_RRC_COOKIE_LEN];
+    size_t written;
+    int ret;
+
+    if (dtls1_get_epoch(s, SSL3_CC_WRITE) == 0)
+        return 0;
+
+    msg[0] = msg_type;
+    memcpy(msg + 1, cookie, DTLS_RRC_COOKIE_LEN);
+
+    if (to != NULL && s->rlayer.wrlmethod->set1_peer != NULL
+        && !s->rlayer.wrlmethod->set1_peer(s->rlayer.wrl, to))
+        return 0;
+    ret = do_dtls1_write(s, SSL3_RT_RETURN_ROUTABILITY_CHECK, msg,
+        sizeof(msg), &written);
+    if (to != NULL && s->rlayer.wrlmethod->set1_peer != NULL)
+        s->rlayer.wrlmethod->set1_peer(s->rlayer.wrl, &s->d1->peer_addr);
+    return ret > 0;
+}
+
+/*-
+ * RFC 9853 section 5.1, the basic check:
+ *   "1. The receiver (i.e., the initiator) creates a
+ *       return_routability_check message of type path_challenge and places
+ *       the unpredictable cookie into the message.
+ *    2. The message is sent to the observed new address and a timer T ...
+ *       is started."
+ * A check already running is left to finish or time out: "the presented
+ * algorithms are not designed to handle nested rebindings" (section 5).
+ * Until it succeeds the connection keeps sending to the address it had, so
+ * nothing larger than the challenge goes to the unvalidated one (section 5,
+ * "limit the data sent to the unvalidated address to the anti-amplification
+ * limit").  The enhanced check of section 5.2 is not implemented.
+ */
+static void dtls_rrc_start(SSL_CONNECTION *s, const BIO_ADDR *new_addr)
+{
+    SSL *ssl = SSL_CONNECTION_GET_SSL(s);
+    OSSL_TIME now = dtls_listener_get_time(ssl);
+
+    if (s->d1->rrc_pending && ossl_time_compare(now, s->d1->rrc_deadline) < 0)
+        return;
+
+    /*
+     * "RRC cookies must be _freshly_ generated using a reliable source of
+     * entropy" (section 8).
+     */
+    if (RAND_bytes_ex(ssl->ctx->libctx, s->d1->rrc_cookie,
+            sizeof(s->d1->rrc_cookie), 0)
+        <= 0) {
+        s->d1->rrc_pending = 0;
+        return;
+    }
+    s->d1->rrc_addr = *new_addr;
+    s->d1->rrc_deadline = ossl_time_add(now, ossl_ms2time(DTLS_RRC_TIMEOUT_MS));
+    s->d1->rrc_pending = dtls_rrc_send(s, DTLS_RRC_PATH_CHALLENGE,
+        s->d1->rrc_cookie, new_addr);
+}
+
+/*
+ * Handle a return_routability_check record that the record layer has passed
+ * up, and so decrypted and verified (RFC 9853 section 4).
+ */
+void ossl_dtls_rrc_record(SSL_CONNECTION *s, const unsigned char *data,
+    size_t len)
+{
+    SSL *ssl = SSL_CONNECTION_GET_SSL(s);
+
+    /*
+     * "implementations MUST be able to parse and gracefully ignore messages
+     * with an unknown msg_type"; the three known ones are one byte and a
+     * cookie, and anything else is invalid, which section 5.4 says to
+     * discard silently.
+     */
+    if (len != 1 + DTLS_RRC_COOKIE_LEN)
+        return;
+
+    switch (data[0]) {
+    case DTLS_RRC_PATH_CHALLENGE:
+        /*
+         * Section 5.4: "The responder MUST NOT delay sending an elicited
+         * path_response", "MUST send exactly one path_response or path_drop
+         * message for each valid path_challenge", and "MUST send the
+         * path_response or the path_drop to the address from which the
+         * corresponding path_challenge was received".  A connection with a
+         * BIO of its own sends where that BIO sends; a listener's goes
+         * back to the challenge's source.  path_drop is for a responder
+         * that has moved to another path of its own accord, which this one
+         * never does, so the answer is always path_response.
+         */
+        dtls_rrc_send(s, DTLS_RRC_PATH_RESPONSE, data + 1,
+            s->d1->listener != NULL && s->d1->rx_peer_set ? &s->d1->rx_peer
+                                                          : NULL);
+        break;
+    case DTLS_RRC_PATH_RESPONSE:
+        /*
+         * Section 5.1: "4. When the initiator receives the
+         * return_routability_check message of type path_response and
+         * verifies that it contains the sent cookie, it updates the peer
+         * address binding.  5. If T expires, the peer address binding is
+         * not updated."  Anything else "MUST silently discard" (5.4).
+         */
+        if (!s->d1->rrc_pending
+            || ossl_time_compare(dtls_listener_get_time(ssl),
+                   s->d1->rrc_deadline)
+                >= 0
+            || CRYPTO_memcmp(data + 1, s->d1->rrc_cookie,
+                   DTLS_RRC_COOKIE_LEN)
+                != 0)
+            return;
+        s->d1->rrc_pending = 0;
+        dtls_move_peer(s, &s->d1->rrc_addr);
+        break;
+    default:
+        /* path_drop answers the enhanced check, which is not sent */
+        break;
+    }
+}
+
 /*-
  * Note a record that the record layer has passed up, and so verified, and
  * move the connection to the address it came from if RFC 9146 section 6
@@ -3123,7 +3269,6 @@ void ossl_dtls_note_record(SSL_CONNECTION *s, uint64_t epoch, uint64_t seq)
 {
     SSL *ssl = SSL_CONNECTION_GET_USER_SSL(s);
     SSL_CTX *ctx = SSL_CONNECTION_GET_CTX(s);
-    BIO_ADDR old_addr;
     int newer;
 
     if (s->d1 == NULL)
@@ -3145,19 +3290,44 @@ void ossl_dtls_note_record(SSL_CONNECTION *s, uint64_t epoch, uint64_t seq)
         || epoch != s->d1->rx_epoch
         || !s->ext.dtls_cid.negotiated || s->ext.dtls_cid.sent_len == 0
         || BIO_ADDR_family(&s->d1->peer_addr) == AF_UNSPEC
-        || dtls_addr_equal(&s->d1->rx_peer, &s->d1->peer_addr)
-        || ctx->dtls_peer_addr_change_cb == NULL)
+        || dtls_addr_equal(&s->d1->rx_peer, &s->d1->peer_addr))
         return;
 
-    if (!ctx->dtls_peer_addr_change_cb(ssl, &s->d1->peer_addr, &s->d1->rx_peer,
-            ctx->dtls_peer_addr_change_arg))
+    /*
+     * RFC 9853 section 3.1: "when both CID and RRC have been successfully
+     * negotiated for the session, if a record with CID is received that has
+     * the source address of the enclosing UDP datagram different from what
+     * is currently associated with that CID value, the receiver SHOULD
+     * perform a return routability check".  The address moves when the
+     * check succeeds, in ossl_dtls_rrc_record().
+     */
+    if (s->ext.dtls_cid.rrc_negotiated) {
+        dtls_rrc_start(s, &s->d1->rx_peer);
         return;
+    }
+
+    /* Without RRC, the application's own mechanism (section 3.1) decides */
+    if (ctx->dtls_peer_addr_change_cb == NULL
+        || !ctx->dtls_peer_addr_change_cb(ssl, &s->d1->peer_addr,
+            &s->d1->rx_peer, ctx->dtls_peer_addr_change_arg))
+        return;
+
+    dtls_move_peer(s, &s->d1->rx_peer);
+}
+
+/*
+ * Make |new_addr| the address a listener's connection sends to, and the one
+ * the listener finds it by.
+ */
+static void dtls_move_peer(SSL_CONNECTION *s, const BIO_ADDR *new_addr)
+{
+    BIO_ADDR old_addr;
 
     old_addr = s->d1->peer_addr;
     if (!dtls_listener_move_conn(s->d1->listener, SSL_CONNECTION_GET_SSL(s),
-            &old_addr, &s->d1->rx_peer))
+            &old_addr, new_addr))
         return;
-    s->d1->peer_addr = s->d1->rx_peer;
+    s->d1->peer_addr = *new_addr;
     if (s->rlayer.wrlmethod != NULL && s->rlayer.wrlmethod->set1_peer != NULL)
         s->rlayer.wrlmethod->set1_peer(s->rlayer.wrl, &s->d1->peer_addr);
 }

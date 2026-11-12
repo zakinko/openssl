@@ -5,6 +5,10 @@
 SSL_set1_dtls_cid,
 SSL_clear_dtls_cid,
 SSL_get0_dtls_cid,
+SSL_set_dtls_rrc,
+SSL_get_dtls_rrc,
+SSL_CTX_set_dtls_peer_addr_change_cb,
+SSL_dtls_peer_addr_change_cb_fn,
 SSL_DTLS_CID_MAX_LEN
 - DTLS 1.2 Connection ID
 
@@ -19,6 +23,17 @@ SSL_DTLS_CID_MAX_LEN
  int SSL_get0_dtls_cid(const SSL *s, const unsigned char **own,
                        size_t *own_len, const unsigned char **peer,
                        size_t *peer_len);
+
+ int SSL_set_dtls_rrc(SSL *s, int enable);
+ int SSL_get_dtls_rrc(const SSL *s);
+
+ typedef int (*SSL_dtls_peer_addr_change_cb_fn)(SSL *s,
+                                                const BIO_ADDR *old_addr,
+                                                const BIO_ADDR *new_addr,
+                                                void *arg);
+ void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
+                                           SSL_dtls_peer_addr_change_cb_fn cb,
+                                           void *arg);
 
 =head1 DESCRIPTION
 
@@ -55,6 +70,38 @@ pointer may then be NULL. Otherwise all four are set to NULL and zero. Any of
 the output arguments may be NULL. The pointers remain valid until the next
 handshake or until I<s> is freed.
 
+SSL_set_dtls_rrc() turns the Return Routability Check of RFC 9853 on or off
+for the next handshake on I<s>. It is on by default and is offered, or
+accepted, only together with the Connection ID. SSL_get_dtls_rrc() reports
+whether it was negotiated in the last handshake.
+
+=head2 Changes of peer address
+
+A connection created by a DTLS listener (see L<SSL_new_listener(3)>) that
+gives Connection IDs (B<SSL_VALUE_DTLS_LISTENER_CID_LEN>, see
+L<SSL_get_value_uint(3)>) has the CID the listener chose, which
+SSL_set1_dtls_cid() cannot replace, and is found by it when records arrive
+from an address other than its peer's. It then sends to the new address only when
+RFC 9146 section 6 allows: the record passed verification, it is newer than
+any record received before, and the new address has been found able to
+receive. The last is decided as follows.
+
+If the Return Routability Check was negotiated, the connection sends a
+path_challenge to the new address and moves there when the matching
+path_response comes back within one second (RFC 9853 section 5.1). Until then
+it keeps sending to the old address, so nothing larger than the challenge
+goes to an address that has not been validated. The enhanced check of RFC
+9853 section 5.2 is not implemented.
+
+Otherwise the callback set with SSL_CTX_set_dtls_peer_addr_change_cb() on the
+B<SSL_CTX> the connection was made from is asked, with the address the
+connection sends to now and the new one; it returns 1 to move and 0 to stay,
+and is asked again for later records from the new address. Without a
+callback the address does not change. A callback that returns 1 without
+having validated the new address in some way of its own (RFC 9853 section
+3.1) leaves the connection open to the attacks described in RFC 9146 section
+9.
+
 =head1 NOTES
 
 The record protection of RFC 9146 is implemented for AEAD ciphers (AES-GCM,
@@ -79,12 +126,11 @@ A record with a CID carries at most 2^14 - 1 bytes of data, one less than a
 record without one, because its plaintext also holds the content type and
 RFC 9146 limits that to 2^14 bytes.
 
-OpenSSL does not change the address it sends to when records arrive from a
-new one. RFC 9146 section 6 forbids doing so before the new address has been
-validated. Note however that a L<BIO_s_datagram(3)> whose socket is not
-connected sends to the source address of the last datagram it received,
-before OpenSSL has checked it; an application that relies on the CID to
-follow a peer to a new address has to manage the peer address itself.
+For a connection with a BIO of its own, rather than one created by a
+listener, OpenSSL does not change the address it sends to. Note however that
+a L<BIO_s_datagram(3)> whose socket is not connected sends to the source
+address of the last datagram it received, before OpenSSL has checked it, which
+RFC 9146 section 6 forbids; use a listener, or a connected socket.
 
 The CID is visible on the wire and identifies the connection for as long as
 it lasts. RFC 9146 section 8 discusses the privacy implications.
@@ -97,9 +143,15 @@ not being a DTLS connection.
 SSL_get0_dtls_cid() returns 1 if the extension was negotiated and 0
 otherwise.
 
+SSL_set_dtls_rrc() returns 1 on success and 0 if I<s> is not a DTLS
+connection. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
+negotiated and 0 otherwise.
+
 =head1 SEE ALSO
 
 L<ssl(7)>,
+L<SSL_new_listener(3)>,
+L<SSL_get_value_uint(3)>,
 L<SSL_set_max_send_fragment(3)>
 
 =head1 HISTORY
