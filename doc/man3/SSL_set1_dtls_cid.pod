@@ -141,10 +141,13 @@ having validated the new address in some way of its own (RFC 9853 section
 =head1 NOTES
 
 The record protection of RFC 9146 is implemented for AEAD ciphers (AES-GCM,
-AES-CCM, ChaCha20-Poly1305) and for CBC ciphers with Encrypt-then-MAC
-(RFC 7366). It is not implemented for CBC ciphers without Encrypt-then-MAC: a
-server does not accept the extension when such a cipher is negotiated, and a
-client aborts the handshake if a server accepts it with one.
+AES-CCM, ChaCha20-Poly1305) and for CBC ciphers with and without
+Encrypt-then-MAC (RFC 7366). Without Encrypt-then-MAC the MAC of a received
+record is checked in constant time by the HMAC provider, which has to support
+the "tls-header-size" parameter (see L<EVP_MAC-HMAC(7)>). If it does not, as
+with an older FIPS provider, a server does not accept the extension when such
+a cipher is negotiated, and a client aborts the handshake if a server accepts
+it with one.
 
 A record with a CID carries at most 2^14 - 1 bytes of data, one less than a
 record without one, because its plaintext also holds the content type and

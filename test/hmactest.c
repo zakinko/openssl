@@ -21,6 +21,8 @@
 
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <openssl/core_names.h>
 #ifndef OPENSSL_NO_MD5
 #include <openssl/md5.h>
 #endif
@@ -432,6 +434,132 @@ err:
     return ret;
 }
 
+/*
+ * The HMAC provider's "tls-data-size" mode computes the MAC of a received
+ * MAC-then-encrypt record in constant time, given the record with its MAC and
+ * CBC padding still on and the length of the data alone.  It must agree with
+ * a plain HMAC over header || data.  The header is 13 bytes for TLS and up
+ * to 278 bytes for DTLS 1.2 with a Connection ID (RFC 9146 section 5.1); the
+ * lengths below put its end before, on and after the 64 and 128 byte hash
+ * block boundaries.
+ */
+static const char *tls_mac_mds[] = { "SHA1", "SHA256", "SHA384" };
+static const size_t tls_mac_hdrs[] = { 13, 27, 63, 64, 65, 127, 128, 129, 278 };
+static const size_t tls_mac_datas[] = { 0, 1, 55, 64, 300, 1500 };
+
+static int test_hmac_tls_mode(int idx)
+{
+    const char *mdname = tls_mac_mds[idx % OSSL_NELEM(tls_mac_mds)];
+    size_t hdrlen = tls_mac_hdrs[idx / OSSL_NELEM(tls_mac_mds)];
+    static const unsigned char key[32] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    unsigned char hdr[278], rec[1500 + 64 + 256], want[EVP_MAX_MD_SIZE];
+    unsigned char got[EVP_MAX_MD_SIZE];
+    size_t i, d, pad, outl, mdsize, total;
+    unsigned int wantl;
+    EVP_MAC *mac = NULL;
+    EVP_MAC_CTX *ctx = NULL;
+    OSSL_PARAM params[4];
+    int testresult = 0;
+
+    for (i = 0; i < sizeof(hdr); i++)
+        hdr[i] = (unsigned char)(i * 7 + 1);
+    for (i = 0; i < sizeof(rec); i++)
+        rec[i] = (unsigned char)(i * 13 + 5);
+
+    if (!TEST_ptr(mac = EVP_MAC_fetch(NULL, "HMAC", NULL)))
+        goto end;
+    mdsize = (size_t)EVP_MD_get_size(EVP_get_digestbyname(mdname));
+
+    for (d = 0; d < OSSL_NELEM(tls_mac_datas); d++) {
+        size_t datalen = tls_mac_datas[d];
+
+        /* No padding, a typical amount, and the most CBC allows (255) */
+        for (pad = 0; pad <= 255; pad += pad == 0 ? 15 : 240) {
+            /* data || MAC || padding || padding_length, as after decryption */
+            total = datalen + mdsize + pad + 1;
+            memset(rec + datalen + mdsize, (int)pad, pad + 1);
+
+            {
+                HMAC_CTX *h = HMAC_CTX_new();
+                int ok = h != NULL
+                    && HMAC_Init_ex(h, key, sizeof(key),
+                        EVP_get_digestbyname(mdname), NULL)
+                    && HMAC_Update(h, hdr, hdrlen)
+                    && HMAC_Update(h, rec, datalen)
+                    && HMAC_Final(h, want, &wantl);
+
+                HMAC_CTX_free(h);
+                if (!TEST_true(ok))
+                    goto end;
+            }
+
+            params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+                (char *)mdname, 0);
+            params[1] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_DATA_SIZE,
+                &total);
+            params[2] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_HEADER_SIZE,
+                &hdrlen);
+            params[3] = OSSL_PARAM_construct_end();
+            EVP_MAC_CTX_free(ctx);
+            if (!TEST_ptr(ctx = EVP_MAC_CTX_new(mac))
+                || !TEST_true(EVP_MAC_init(ctx, key, sizeof(key), params))
+                || !TEST_true(EVP_MAC_update(ctx, hdr, hdrlen))
+                || !TEST_true(EVP_MAC_update(ctx, rec, datalen))
+                || !TEST_true(EVP_MAC_final(ctx, got, &outl, sizeof(got)))
+                || !TEST_mem_eq(got, outl, want, wantl)) {
+                TEST_info("%s header %zu data %zu padding %zu", mdname,
+                    hdrlen, datalen, pad);
+                goto end;
+            }
+        }
+    }
+
+    /* A header of another length than declared is refused */
+    total = mdsize + 1;
+    rec[mdsize] = 0;
+    params[1] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_DATA_SIZE,
+        &total);
+    EVP_MAC_CTX_free(ctx);
+    if (!TEST_ptr(ctx = EVP_MAC_CTX_new(mac))
+        || !TEST_true(EVP_MAC_init(ctx, key, sizeof(key), params))
+        || !TEST_false(EVP_MAC_update(ctx, hdr, hdrlen + 1)))
+        goto end;
+
+    testresult = 1;
+end:
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(mac);
+    return testresult;
+}
+
+/* "tls-header-size" outside 13 .. 278 is refused */
+static int test_hmac_tls_header_size_bounds(void)
+{
+    static const size_t bad[] = { 0, 12, 279, 4096 };
+    EVP_MAC *mac = NULL;
+    EVP_MAC_CTX *ctx = NULL;
+    OSSL_PARAM params[2];
+    size_t i, v;
+    int testresult = 0;
+
+    if (!TEST_ptr(mac = EVP_MAC_fetch(NULL, "HMAC", NULL))
+        || !TEST_ptr(ctx = EVP_MAC_CTX_new(mac)))
+        goto end;
+    for (i = 0; i < OSSL_NELEM(bad); i++) {
+        v = bad[i];
+        params[0] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_TLS_HEADER_SIZE,
+            &v);
+        params[1] = OSSL_PARAM_construct_end();
+        if (!TEST_false(EVP_MAC_CTX_set_params(ctx, params)))
+            goto end;
+    }
+    testresult = 1;
+end:
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(mac);
+    return testresult;
+}
+
 int setup_tests(void)
 {
     ADD_ALL_TESTS(test_hmac_md5, 4);
@@ -441,6 +569,9 @@ int setup_tests(void)
     ADD_TEST(test_hmac_final_update_fail);
     ADD_TEST(test_hmac_copy);
     ADD_TEST(test_hmac_copy_uninited);
+    ADD_ALL_TESTS(test_hmac_tls_mode,
+        OSSL_NELEM(tls_mac_mds) * OSSL_NELEM(tls_mac_hdrs));
+    ADD_TEST(test_hmac_tls_header_size_bounds);
     ADD_ALL_TESTS(test_hmac_chunks,
         sizeof(test_chunks) / sizeof(struct test_chunks_st));
     return 1;

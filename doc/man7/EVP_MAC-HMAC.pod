@@ -63,6 +63,8 @@ It may be set but is currently ignored.
 
 =item "tls-data-size" (B<OSSL_MAC_PARAM_TLS_DATA_SIZE>) <unsigned integer>
 
+=item "tls-header-size" (B<OSSL_MAC_PARAM_TLS_HEADER_SIZE>) <unsigned integer>
+
 =item "key-check" (B<OSSL_MAC_PARAM_FIPS_KEY_CHECK>) <integer>
 
 See L<provider-mac(7)/Mac Parameters>.

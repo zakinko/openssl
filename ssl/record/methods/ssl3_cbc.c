@@ -111,7 +111,10 @@ static void tls1_sha512_final_raw(void *ctx, unsigned char *md_out)
  *     ssl3_cbc_record_digest_supported must return true for this EVP_MD_CTX.
  *   md_out: the digest output. At most EVP_MAX_MD_SIZE bytes will be written.
  *   md_out_size: if non-NULL, the number of output bytes is written here.
- *   header: the 13-byte, TLS record header.
+ *   header: the record header that precedes the data in the MAC input: the
+ *     13 bytes of TLS, or the longer one of a DTLS 1.2 record with a
+ *     Connection ID (RFC 9146 section 5.1).
+ *   header_length: the length of |header|, public.
  *   data: the record data itself, less any preceding explicit IV.
  *   data_size: the secret, reported length of the data once the MAC and padding
  *              has been removed.
@@ -125,6 +128,7 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
     unsigned char *md_out,
     size_t *md_out_size,
     const unsigned char *header,
+    size_t header_length,
     const unsigned char *data,
     size_t data_size,
     size_t data_plus_mac_plus_padding_size,
@@ -138,7 +142,7 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
     void (*md_final_raw)(void *ctx, unsigned char *md_out);
     void (*md_transform)(void *ctx, const unsigned char *block);
     size_t md_size, md_block_size = 64;
-    size_t header_length, variance_blocks, len, max_mac_bytes, num_blocks,
+    size_t variance_blocks, len, max_mac_bytes, num_blocks,
         num_starting_blocks, k, mac_end_offset, c, index_a, index_b;
     size_t bits; /* at most 18 bits */
     unsigned char length_bytes[MAX_HASH_BIT_COUNT_BYTES];
@@ -161,7 +165,9 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
      * This is a, hopefully redundant, check that allows us to forget about
      * many possible overflows later in this function.
      */
-    if (!ossl_assert(data_plus_mac_plus_padding_size < 1024 * 1024))
+    if (!ossl_assert(data_plus_mac_plus_padding_size < 1024 * 1024)
+        || !ossl_assert(header_length >= SSL3_CBC_TLS_HEADER_LENGTH
+            && header_length <= SSL3_CBC_MAX_HEADER_LENGTH))
         return 0;
 
     if (EVP_MD_is_a(md, "MD5")) {
@@ -224,8 +230,6 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
         || !ossl_assert(md_size <= EVP_MAX_MD_SIZE))
         return 0;
 
-    header_length = 13;
-
     /*
      * variance_blocks is the number of blocks of the hash that we have to
      * calculate in constant time because they could be altered by the
@@ -240,8 +244,8 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
     variance_blocks = ((255 + 1 + md_size + md_block_size - 1) / md_block_size) + 1;
 
     /*
-     * From now on we're dealing with the MAC, which conceptually has 13
-     * bytes of `header' before the start of the data (TLS)
+     * From now on we're dealing with the MAC, which conceptually has
+     * |header_length| bytes of `header' before the start of the data
      */
     len = data_plus_mac_plus_padding_size + header_length;
     /*
@@ -323,13 +327,25 @@ int ssl3_cbc_digest_record(const EVP_MD *md,
         length_bytes[md_length_size - 8] = (unsigned char)bits;
     }
 
-    if (k > 0) {
-        /* k is a multiple of md_block_size. */
-        memcpy(first_block, header, 13);
-        memcpy(first_block + 13, data, md_block_size - 13);
+    /*
+     * k is a multiple of md_block_size.  These blocks are hashed as they
+     * stand: no padding value can reach them, and where they end is public.
+     * A 13 byte header always ends within the first block; a longer one
+     * (RFC 9146 section 5.1) can take more than one block, so each block is
+     * cut from header || data.
+     */
+    for (i = 0; i < k / md_block_size; i++) {
+        size_t off = md_block_size * i;
+
+        if (off >= header_length) {
+            md_transform(md_state.c, data + off - header_length);
+            continue;
+        }
+        for (j = 0; j < md_block_size; j++)
+            first_block[j] = off + j < header_length
+                ? header[off + j]
+                : data[off + j - header_length];
         md_transform(md_state.c, first_block);
-        for (i = 1; i < k / md_block_size; i++)
-            md_transform(md_state.c, data + md_block_size * i - 13);
     }
 
     memset(mac_out, 0, sizeof(mac_out));
