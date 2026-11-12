@@ -609,6 +609,24 @@ int ossl_dgram_cid_lookup_register(DGRAM_CID_LOOKUP *lookup,
     return 1;
 }
 
+void ossl_dgram_cid_lookup_unregister(DGRAM_CID_LOOKUP *lookup,
+    const unsigned char *cid, size_t cid_len, DGRAM_CONN_ENTRY **list)
+{
+    DGRAM_CONN_ENTRY *entry;
+
+    if (lookup == NULL)
+        return;
+
+    for (; (entry = *list) != NULL; list = &entry->next) {
+        if (entry->hashkey_len == cid_len
+            && memcmp(entry->hashkey, cid, cid_len) == 0) {
+            *list = entry->next;
+            conn_entry_free(lh_DGRAM_CONN_ENTRY_delete(lookup->htable, entry));
+            return;
+        }
+    }
+}
+
 /*
  * The connection keeps the list of its entries, so that none of the paths
  * that free a connection has to remember its CIDs, nor search the table for

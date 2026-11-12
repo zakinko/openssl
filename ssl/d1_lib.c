@@ -384,7 +384,7 @@ int dtls_any_sent_messages_are_missing_acknowledge(SSL_CONNECTION *s)
     return 0;
 }
 
-int dtls_has_unacked_key_update(SSL_CONNECTION *s)
+int dtls_has_unacked_message(SSL_CONNECTION *s, int msg_type)
 {
     pitem *item;
     piterator iter = pqueue_iterator(&s->d1->sent_messages);
@@ -392,12 +392,17 @@ int dtls_has_unacked_key_update(SSL_CONNECTION *s)
     while ((item = pqueue_next(&iter)) != NULL) {
         dtls_sent_msg *msg = (dtls_sent_msg *)item->data;
 
-        if (msg->msg_info.msg_type == SSL3_MT_KEY_UPDATE
+        if (msg->msg_info.msg_type == msg_type
             && !ossl_list_record_number_is_empty(&msg->rec_nums))
             return 1;
     }
 
     return 0;
+}
+
+int dtls_has_unacked_key_update(SSL_CONNECTION *s)
+{
+    return dtls_has_unacked_message(s, SSL3_MT_KEY_UPDATE);
 }
 
 void dtls1_free(SSL *ssl)
@@ -728,6 +733,10 @@ int dtls1_stop_timer_for_read_flight(SSL_CONNECTION *s)
         && (s->statem.hand_state == TLS_ST_SR_KEY_UPDATE
             || s->statem.hand_state == TLS_ST_CR_KEY_UPDATE
             || s->statem.hand_state == TLS_ST_CR_SESSION_TICKET
+            || s->statem.hand_state == TLS_ST_SR_NEW_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_CR_NEW_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_SR_REQUEST_CONNECTION_ID
+            || s->statem.hand_state == TLS_ST_CR_REQUEST_CONNECTION_ID
             || (s->statem.hand_state == TLS_ST_CR_CERT_REQ
                 && s->post_handshake_auth == SSL_PHA_REQUESTED))
         && dtls_any_sent_messages_are_missing_acknowledge(s)) {
@@ -1548,16 +1557,45 @@ static int dtls_listener_assign_cid(DTLS_LISTENER *dl, SSL *ssl)
  * dl->mutex.
  */
 #define DTLS_TLS12_CID_OFFSET 11
+/* RFC 9147 section 4, Figure 3: the CID follows the unified header's first byte */
+#define DTLS13_CID_OFFSET 1
+/*
+ * Is |first| the first byte of a DTLS 1.3 unified header with the C bit?
+ * RFC 9147 section 4, Figure 3: 0 0 1 C S L E E.
+ */
+static int dtls13_unified_with_cid(unsigned char first)
+{
+    return (first & DTLS13_UNI_HDR_FIX_BITS_MASK) == DTLS13_UNI_HDR_FIX_BITS
+        && (first & DTLS13_UNI_HDR_CID_BIT) != 0;
+}
+
 static SSL *dtls_listener_find_by_cid(DTLS_LISTENER *dl, const DGRAM_URXE *urxe)
 {
     const unsigned char *data = ossl_dgram_urxe_data(urxe);
+    size_t off;
 
-    if (dl->cid_len == 0 || urxe->data_len < DTLS_TLS12_CID_OFFSET + dl->cid_len
-        || data[0] != SSL3_RT_TLS12_CID)
+    if (dl->cid_len == 0 || urxe->data_len == 0)
+        return NULL;
+    if (data[0] == SSL3_RT_TLS12_CID)
+        off = DTLS_TLS12_CID_OFFSET;
+    else if (dtls13_unified_with_cid(data[0]))
+        off = DTLS13_CID_OFFSET;
+    else
+        return NULL;
+    if (urxe->data_len < off + dl->cid_len)
         return NULL;
 
-    return ossl_dgram_cid_lookup_find(dl->cid_conns,
-        data + DTLS_TLS12_CID_OFFSET, dl->cid_len);
+    return ossl_dgram_cid_lookup_find(dl->cid_conns, data + off, dl->cid_len);
+}
+
+/* Does the datagram begin with a record that carries a CID? */
+static int dtls_urxe_has_cid(const DGRAM_URXE *urxe)
+{
+    const unsigned char *data = ossl_dgram_urxe_data(urxe);
+
+    return urxe->data_len > 0
+        && (data[0] == SSL3_RT_TLS12_CID
+            || dtls13_unified_with_cid(data[0]));
 }
 
 /*
@@ -1704,12 +1742,12 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
     ossl_crypto_mutex_lock(dl->mutex);
 
     /*
-     * A tls12_cid record goes to the connection its CID names, whatever
-     * address it came from: that is what the CID is for.  One naming no
+     * A record with a CID (tls12_cid, or a DTLS 1.3 unified header with the
+     * C bit) goes to the connection its CID names, whatever address it came
+     * from: that is what the CID is for.  One naming no
      * connection of ours is dropped; it cannot start a handshake.
      */
-    if (dl->cid_len != 0 && urxe->data_len > 0
-        && ossl_dgram_urxe_data(urxe)[0] == SSL3_RT_TLS12_CID) {
+    if (dl->cid_len != 0 && dtls_urxe_has_cid(urxe)) {
         conn_ssl = dtls_listener_find_by_cid(dl, urxe);
         if (conn_ssl == NULL)
             goto release;
@@ -3193,6 +3231,46 @@ void ossl_dtls_listener_unregister_conn_cid(SSL *s, SSL *conn)
     ossl_crypto_mutex_lock(dl->mutex);
     ossl_dgram_cid_lookup_unregister_all(dl->cid_conns, &sc->listener_cids);
     ossl_crypto_mutex_unlock(dl->mutex);
+}
+
+void ossl_dtls_listener_remove_conn_cid(SSL *s, SSL *conn,
+    const unsigned char *cid, size_t cid_len)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(conn);
+    DTLS_LISTENER *dl;
+
+    if (s == NULL || !IS_DTLS_LISTENER(s) || sc == NULL)
+        return;
+
+    dl = (DTLS_LISTENER *)s;
+
+    ossl_crypto_mutex_lock(dl->mutex);
+    ossl_dgram_cid_lookup_unregister(dl->cid_conns, cid, cid_len,
+        &sc->listener_cids);
+    ossl_crypto_mutex_unlock(dl->mutex);
+}
+
+int ossl_dtls_listener_add_conn_cid(SSL *s, SSL *conn, const unsigned char *cid,
+    size_t cid_len)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(conn);
+    DTLS_LISTENER *dl;
+    int ok;
+
+    if (s == NULL || !IS_DTLS_LISTENER(s))
+        return 1;
+    if (sc == NULL)
+        return 0;
+
+    dl = (DTLS_LISTENER *)s;
+
+    ossl_crypto_mutex_lock(dl->mutex);
+    ok = dl->cid_len == 0
+        || (cid_len == dl->cid_len
+            && ossl_dgram_cid_lookup_register(dl->cid_conns, cid, cid_len,
+                conn, &sc->listener_cids));
+    ossl_crypto_mutex_unlock(dl->mutex);
+    return ok;
 }
 
 /*
