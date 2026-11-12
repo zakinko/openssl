@@ -1,0 +1,47 @@
+name: bsd-check
+on:
+  push:
+    branches: [netbsd-fixes-ci]
+jobs:
+  netbsd:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64, riscv64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          release: "11.1"
+          arch: ${{ matrix.arch }}
+          usesh: true
+          prepare: /usr/sbin/pkg_add perl
+          run: |
+            set -e
+            uname -m; uname -p
+            ./Configure | grep target
+            make -j$(sysctl -n hw.ncpu) > build.log 2>&1 || { tail -50 build.log; exit 1; }
+            make test TESTS='test_bio_dgram test_internal_bn test_ec test_rsa' V=1
+  freebsd:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [powerpc64, riscv64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          arch: ${{ matrix.arch }}
+          usesh: true
+          prepare: pkg install -y perl5
+          run: |
+            set -e
+            uname -m; uname -p
+            ./Configure | grep target
+            make -j$(sysctl -n hw.ncpu) > build.log 2>&1 || { tail -50 build.log; exit 1; }
+            make test TESTS='test_bio_dgram test_internal_bn test_ec test_rsa' V=1
