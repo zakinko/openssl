@@ -3367,6 +3367,474 @@ static int test_dtls_cid_long(int idx)
     return cid_long(DTLS1_2_VERSION, cid_ciphers[idx == 0 ? 0 : 4]);
 }
 
+#ifndef OPENSSL_NO_DTLS1_3
+/*
+ * DTLS 1.3 with CIDs (RFC 9147 sections 4 and 9.1), in both directions and
+ * in one: the unified header carries the C bit and the CID right after its
+ * first byte, from the handshake epoch on.  idx / 3 picks the cipher suite.
+ */
+static int test_dtls13_cid(int idx)
+{
+    static const char *suites[] = {
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_CHACHA20_POLY1305_SHA256",
+    };
+    static const int lens[3][2] = {
+        { sizeof(cid_client), sizeof(cid_server) },
+        { 0, sizeof(cid_server) },
+        { sizeof(cid_client), 0 },
+    };
+    static const char msg[] = "dtls 1.3 connection id";
+    int clen = lens[idx % 3][0], slen = lens[idx % 3][1];
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    CID_LAST_HDR clast, slast;
+    const unsigned char *own, *peer;
+    size_t ownlen, peerlen, n;
+    char buf[sizeof(msg)];
+    int testresult = 0;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    if (!SSL_CTX_set_ciphersuites(cctx, suites[idx / 3])) {
+        testresult = TEST_skip("%s not available", suites[idx / 3]);
+        goto end;
+    }
+    if (!TEST_true(SSL_CTX_set_ciphersuites(sctx, suites[idx / 3]))
+        || !TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl, NULL, NULL))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, (size_t)clen))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, (size_t)slen)))
+        goto end;
+    BIO_ctrl(SSL_get_wbio(cssl), MEMPACKET_CTRL_SET_CID_LEN, slen, NULL);
+    BIO_ctrl(SSL_get_wbio(sssl), MEMPACKET_CTRL_SET_CID_LEN, clen, NULL);
+    SSL_set_msg_callback(cssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(cssl, &clast);
+    SSL_set_msg_callback(sssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(sssl, &slast);
+
+    if (!TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !TEST_int_eq(SSL_version(cssl), DTLS1_3_VERSION)
+        || !TEST_int_eq(SSL_get0_dtls_cid(cssl, &own, &ownlen, &peer, &peerlen), 1)
+        || !cid_eq(own, ownlen, cid_client, (size_t)clen)
+        || !cid_eq(peer, peerlen, cid_server, (size_t)slen)
+        || !TEST_int_eq(SSL_get0_dtls_cid(sssl, &own, &ownlen, &peer, &peerlen), 1)
+        || !cid_eq(own, ownlen, cid_server, (size_t)slen)
+        || !cid_eq(peer, peerlen, cid_client, (size_t)clen))
+        goto end;
+
+    /* Client to server: the server's CID after the first byte */
+    clast.hdrlen = 0;
+    if (!TEST_true(SSL_write_ex(cssl, msg, sizeof(msg), &n))
+        || !TEST_true(SSL_read_ex(sssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, msg, sizeof(msg))
+        || !TEST_size_t_gt(clast.hdrlen, 0)
+        || !TEST_int_eq(clast.hdr[0] & DTLS13_UNI_HDR_FIX_BITS_MASK,
+            DTLS13_UNI_HDR_FIX_BITS)
+        || !TEST_int_eq((clast.hdr[0] & DTLS13_UNI_HDR_CID_BIT) != 0, slen != 0)
+        || (slen != 0
+            && !TEST_mem_eq(clast.hdr + 1, (size_t)slen, cid_server,
+                (size_t)slen)))
+        goto end;
+
+    /* Server to client: the client's CID */
+    slast.hdrlen = 0;
+    if (!TEST_true(SSL_write_ex(sssl, msg, sizeof(msg), &n))
+        || !TEST_true(SSL_read_ex(cssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, msg, sizeof(msg))
+        || !TEST_size_t_gt(slast.hdrlen, 0)
+        || !TEST_int_eq((slast.hdr[0] & DTLS13_UNI_HDR_CID_BIT) != 0, clen != 0)
+        || (clen != 0
+            && !TEST_mem_eq(slast.hdr + 1, (size_t)clen, cid_client,
+                (size_t)clen)))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+#endif
+
+#ifndef OPENSSL_NO_DTLS1_3
+/* Send |msg| from |from| to |to|; post-handshake messages travel with it */
+static int cid_pass(SSL *from, SSL *to, const char *msg)
+{
+    char buf[64];
+    size_t n, len = strlen(msg);
+
+    return TEST_true(SSL_write_ex(from, msg, len, &n))
+        && TEST_true(SSL_read_ex(to, buf, sizeof(buf), &n))
+        && TEST_mem_eq(buf, n, msg, len);
+}
+
+/*
+ * Run both ends until neither is in a handshake: a DTLS 1.3 post-handshake
+ * message waits for its ACK (RFC 9147 section 7) before the sender writes
+ * again, and the answer to RequestConnectionId is a flight of its own.
+ */
+static int cid_settle(SSL *a, SSL *b)
+{
+    char buf[64];
+    size_t n;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        if (!SSL_in_init(a) && !SSL_in_init(b))
+            return 1;
+        if (SSL_read_ex(a, buf, sizeof(buf), &n)
+            || SSL_get_error(a, 0) != SSL_ERROR_WANT_READ
+            || SSL_read_ex(b, buf, sizeof(buf), &n)
+            || SSL_get_error(b, 0) != SSL_ERROR_WANT_READ)
+            break;
+    }
+    TEST_error("unexpected data, error, or still in a handshake");
+    return 0;
+}
+
+/*
+ * RFC 9147 section 9, CID updates over a DTLS 1.3 connection with CIDs both
+ * ways.
+ *   0: the client gives a new CID for immediate use (NewConnectionId,
+ *      cid_immediate); the server's records carry it from then on
+ *   1: the server asks for two spare CIDs (RequestConnectionId); the client
+ *      answers with a NewConnectionId, cid_spare, carrying two
+ *   2: neither message can be asked for on a DTLS 1.2 connection
+ *   3: the client's NewConnectionId and the server's RequestConnectionId
+ *      cross on the wire (section 5.8.4, "Messages of each category can be
+ *      sent independently")
+ *   4: the client gives new CIDs for immediate use until it has no more to
+ *      give, and cannot queue another
+ */
+static int test_dtls13_cid_update(int idx)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    SSL_CONNECTION *ssc, *csc;
+    CID_LAST_HDR clast, slast;
+    const unsigned char *peer;
+    size_t peerlen;
+    int testresult = 0, i, ret;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), idx == 2 ? DTLS1_2_VERSION : DTLS1_3_VERSION,
+            idx == 2 ? DTLS1_2_VERSION : DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl, NULL, NULL)))
+        goto end;
+    if (idx != 2) {
+        if (!TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client)))
+            || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server))))
+            goto end;
+        BIO_ctrl(SSL_get_wbio(cssl), MEMPACKET_CTRL_SET_CID_LEN,
+            sizeof(cid_server), NULL);
+        BIO_ctrl(SSL_get_wbio(sssl), MEMPACKET_CTRL_SET_CID_LEN,
+            sizeof(cid_client), NULL);
+    }
+    SSL_set_msg_callback(cssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(cssl, &clast);
+    SSL_set_msg_callback(sssl, cid_msg_cb);
+    SSL_set_msg_callback_arg(sssl, &slast);
+    if (!TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !TEST_ptr(ssc = SSL_CONNECTION_FROM_SSL_ONLY(sssl))
+        || !TEST_ptr(csc = SSL_CONNECTION_FROM_SSL_ONLY(cssl)))
+        goto end;
+
+    switch (idx) {
+    case 0:
+        if (!TEST_true(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_IMMEDIATE))
+            /* A second one waits for the first to be acknowledged */
+            || !TEST_false(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_SPARE))
+            || !cid_settle(cssl, sssl)
+            || !TEST_int_eq(SSL_get0_dtls_cid(sssl, NULL, NULL, &peer, &peerlen), 1)
+            || !TEST_size_t_eq(peerlen, sizeof(cid_client))
+            || !TEST_mem_ne(peer, peerlen, cid_client, sizeof(cid_client))
+            || !TEST_size_t_eq(csc->ext.dtls_cid.own_more_num, 1)
+            || !TEST_mem_eq(peer, peerlen, csc->ext.dtls_cid.own_more,
+                sizeof(cid_client)))
+            goto end;
+        /* The server writes with the new CID, and the client takes it */
+        slast.hdrlen = 0;
+        if (!cid_pass(sssl, cssl, "with the new cid")
+            || !TEST_size_t_gt(slast.hdrlen, sizeof(cid_client))
+            || !TEST_mem_eq(slast.hdr + 1, sizeof(cid_client), peer, peerlen)
+            || !cid_pass(cssl, sssl, "still fine"))
+            goto end;
+        break;
+    case 1:
+        if (!TEST_true(SSL_dtls_request_connection_id(sssl, 2))
+            || !cid_settle(sssl, cssl)
+            /* Answered, so another may be made */
+            || !TEST_false(ssc->ext.dtls_cid.rcid_unfulfilled)
+            || !TEST_size_t_eq(ssc->ext.dtls_cid.spares_num, 2)
+            || !TEST_size_t_eq(csc->ext.dtls_cid.own_more_num, 2)
+            || !TEST_mem_eq(ssc->ext.dtls_cid.spares[0].cid,
+                ssc->ext.dtls_cid.spares[0].len, csc->ext.dtls_cid.own_more,
+                sizeof(cid_client))
+            /* The CID in use stays */
+            || !TEST_int_eq(SSL_get0_dtls_cid(sssl, NULL, NULL, &peer, &peerlen), 1)
+            || !TEST_mem_eq(peer, peerlen, cid_client, sizeof(cid_client)))
+            goto end;
+        break;
+    case 2:
+        ERR_set_mark();
+        if (!TEST_false(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_IMMEDIATE))
+            || !TEST_false(SSL_dtls_request_connection_id(sssl, 1))) {
+            ERR_clear_last_mark();
+            goto end;
+        }
+        ERR_pop_to_mark();
+        break;
+    case 3:
+        /* Both queue a message, and both send before either reads */
+        if (!TEST_true(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_IMMEDIATE))
+            || !TEST_true(SSL_dtls_request_connection_id(sssl, 2)))
+            goto end;
+        if ((ret = SSL_do_handshake(cssl)) <= 0
+            && !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        if ((ret = SSL_do_handshake(sssl)) <= 0
+            && !TEST_int_eq(SSL_get_error(sssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        if (!cid_settle(sssl, cssl)
+            /* The server's request was answered */
+            || !TEST_false(ssc->ext.dtls_cid.rcid_unfulfilled)
+            || !TEST_size_t_eq(ssc->ext.dtls_cid.spares_num, 2)
+            /* and it sends with the CID the client gave */
+            || !TEST_size_t_eq(csc->ext.dtls_cid.own_more_num, 3)
+            || !TEST_int_eq(SSL_get0_dtls_cid(sssl, NULL, NULL, &peer, &peerlen), 1)
+            || !TEST_mem_eq(peer, peerlen, csc->ext.dtls_cid.own_more,
+                sizeof(cid_client))
+            || !cid_pass(sssl, cssl, "crossed")
+            || !cid_pass(cssl, sssl, "crossed"))
+            goto end;
+        break;
+    case 4:
+        for (i = 0; i < DTLS_CID_MAX_OWN_MORE; i++) {
+            if (!TEST_true(SSL_dtls_new_connection_id(cssl,
+                    SSL_DTLS_CID_IMMEDIATE))
+                || !cid_settle(cssl, sssl)
+                || !cid_pass(sssl, cssl, "next cid"))
+                goto end;
+        }
+        /* "cid_immediate" has to bring a CID, and there is none left */
+        ERR_set_mark();
+        if (!TEST_false(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_IMMEDIATE))
+            || !TEST_false(SSL_dtls_new_connection_id(cssl, SSL_DTLS_CID_SPARE))) {
+            ERR_clear_last_mark();
+            goto end;
+        }
+        ERR_pop_to_mark();
+        if (!TEST_size_t_eq(csc->ext.dtls_cid.own_more_num, DTLS_CID_MAX_OWN_MORE)
+            || !cid_pass(cssl, sssl, "still fine")
+            || !cid_pass(sssl, cssl, "still fine"))
+            goto end;
+        break;
+    }
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+static int test_dtls13_cid_long(void)
+{
+    return cid_long(DTLS1_3_VERSION, NULL);
+}
+
+/*
+ * DTLS 1.3 early data on a connection that negotiates CIDs.  The client does
+ * not know the server's CID yet, so early data goes without one, and the
+ * server reads it with a record layer that has none.
+ *   0: the handshake completes and data flows with the CIDs
+ *   1: while the server reads early data, a record arrives that has the C
+ *      bit, the server's CID, which the ServerHello showed, and the early
+ *      data epoch.  No such record was sent; it is invalid and is discarded
+ *      (RFC 9147 section 4.5.2).
+ */
+static int test_dtls13_cid_early_data(int idx)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    SSL_SESSION *sess = NULL;
+    unsigned char bad[1 + sizeof(cid_server) + 4 + 40];
+    char buf[64];
+    size_t n;
+    int testresult = 0, i, ret = 0, cdone = 0, sfin = 0, sdone = 0;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_true(SSL_CTX_set_max_early_data(sctx, SSL3_RT_MAX_PLAIN_LENGTH))
+        || !TEST_true(cid_dgram_pair_objects(sctx, cctx, &sssl, &cssl))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client)))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server)))
+        || !TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !cid_pass(cssl, sssl, "one")
+        || !cid_pass(sssl, cssl, "two")
+        || !cid_settle(cssl, sssl)
+        || !TEST_ptr(sess = SSL_get1_session(cssl))
+        || !TEST_uint_gt(SSL_SESSION_get_max_early_data(sess), 0))
+        goto end;
+    SSL_shutdown(cssl);
+    SSL_shutdown(sssl);
+    SSL_free(sssl);
+    SSL_free(cssl);
+    sssl = cssl = NULL;
+
+    if (!TEST_true(cid_dgram_pair_objects(sctx, cctx, &sssl, &cssl))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client)))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server)))
+        || !TEST_true(SSL_set_session(cssl, sess))
+        || !TEST_true(SSL_write_early_data(cssl, "early", 5, &n)))
+        goto end;
+    for (i = 0; i < 10; i++) {
+        ret = SSL_read_early_data(sssl, buf, sizeof(buf), &n);
+        if (ret != SSL_READ_EARLY_DATA_ERROR)
+            break;
+        if (!TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    if (!TEST_int_eq(ret, SSL_READ_EARLY_DATA_SUCCESS)
+        || !TEST_mem_eq(buf, n, "early", 5))
+        goto end;
+
+    if (idx == 1) {
+        memset(bad, 0xaa, sizeof(bad));
+        bad[0] = DTLS13_UNI_HDR_FIX_BITS | DTLS13_UNI_HDR_CID_BIT
+            | DTLS13_UNI_HDR_SEQ_BIT | DTLS13_UNI_HDR_LEN_BIT | 0x01;
+        memcpy(bad + 1, cid_server, sizeof(cid_server));
+        bad[sizeof(cid_server) + 3] = 0;
+        bad[sizeof(cid_server) + 4] = 40;
+        if (!TEST_int_eq(BIO_write(SSL_get_wbio(cssl), bad, sizeof(bad)),
+                sizeof(bad)))
+            goto end;
+    }
+
+    for (i = 0; i < 50 && !(cdone && sdone); i++) {
+        if (!cdone) {
+            ret = SSL_connect(cssl);
+            cdone = ret > 0;
+            if (ret <= 0
+                && !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ))
+                goto end;
+        }
+        if (!sfin) {
+            ret = SSL_read_early_data(sssl, buf, sizeof(buf), &n);
+            if (ret == SSL_READ_EARLY_DATA_FINISH)
+                sfin = 1;
+            else if (!TEST_int_eq(ret, SSL_READ_EARLY_DATA_ERROR)
+                || !TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_WANT_READ))
+                goto end;
+        }
+        if (sfin && !sdone) {
+            ret = SSL_accept(sssl);
+            sdone = ret > 0;
+            if (ret <= 0
+                && !TEST_int_eq(SSL_get_error(sssl, ret), SSL_ERROR_WANT_READ))
+                goto end;
+        }
+    }
+    if (!TEST_true(cdone && sdone)
+        || !TEST_int_eq(SSL_get_early_data_status(cssl), SSL_EARLY_DATA_ACCEPTED)
+        || !TEST_int_eq(SSL_get0_dtls_cid(sssl, NULL, NULL, NULL, NULL), 1)
+        || !cid_pass(cssl, sssl, "after")
+        || !cid_pass(sssl, cssl, "after"))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_SESSION_free(sess);
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
+/*
+ * RFC 9147 section 4: "If a Connection ID is negotiated, then it MUST be
+ * contained in all datagrams", which is not to say in all records.  A record
+ * without the CID is taken when a record of its datagram before it has the
+ * CID, and discarded in a datagram of its own.
+ */
+static int test_dtls13_cid_per_datagram(void)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    OSSL_RECORD_LAYER *wrl;
+    BIO *wire, *cwbio;
+    unsigned char both[512], alone[256];
+    char buf[16];
+    size_t n, cidlen;
+    int testresult = 0, len1, len2, len3;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_true(cid_dgram_pair_objects(sctx, cctx, &sssl, &cssl))
+        || !TEST_true(SSL_set1_dtls_cid(cssl, cid_client, sizeof(cid_client)))
+        || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server, sizeof(cid_server)))
+        || !TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !cid_pass(cssl, sssl, "one")
+        || !cid_pass(sssl, cssl, "two")
+        || !cid_settle(cssl, sssl))
+        goto end;
+
+    /* Three records off the wire, the second and third written without CID */
+    wire = SSL_get_rbio(sssl);
+    cwbio = SSL_get_wbio(cssl);
+    wrl = SSL_CONNECTION_FROM_SSL_ONLY(cssl)->rlayer.wrl;
+    cidlen = wrl->cid_len;
+    if (!TEST_size_t_eq(cidlen, sizeof(cid_server))
+        || !TEST_true(SSL_write_ex(cssl, "a", 1, &n))
+        || !TEST_int_gt(len1 = BIO_read(wire, both, sizeof(both) / 2), 0))
+        goto end;
+    wrl->cid_len = 0;
+    if (!TEST_true(SSL_write_ex(cssl, "b", 1, &n))
+        || !TEST_int_gt(len2 = BIO_read(wire, both + len1, sizeof(both) / 2), 0)
+        || !TEST_true(SSL_write_ex(cssl, "c", 1, &n))
+        || !TEST_int_gt(len3 = BIO_read(wire, alone, sizeof(alone)), 0)) {
+        wrl->cid_len = cidlen;
+        goto end;
+    }
+    wrl->cid_len = cidlen;
+    if (!TEST_true(DTLS13_UNI_HDR_CID_BIT_IS_SET(both[0]))
+        || !TEST_false(DTLS13_UNI_HDR_CID_BIT_IS_SET(both[len1]))
+        || !TEST_false(DTLS13_UNI_HDR_CID_BIT_IS_SET(alone[0])))
+        goto end;
+
+    /* A datagram without the CID */
+    if (!TEST_int_eq(BIO_write(cwbio, alone, len3), len3)
+        || !TEST_false(SSL_read_ex(sssl, buf, sizeof(buf), &n))
+        || !TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_WANT_READ))
+        goto end;
+    /* A datagram whose first record has the CID and whose second has not */
+    if (!TEST_int_eq(BIO_write(cwbio, both, len1 + len2), len1 + len2)
+        || !TEST_true(SSL_read_ex(sssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "a", 1)
+        || !TEST_true(SSL_read_ex(sssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "b", 1))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+#endif
+
 static int test_dtls_cid_api(void)
 {
     SSL_CTX *ctx = NULL, *tlsctx = NULL;
@@ -3474,6 +3942,13 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_dtls_cid_max_fragment, 2);
     ADD_ALL_TESTS(test_dtls_cid_long, 2);
     ADD_TEST(test_dtls_cid_api);
+#ifndef OPENSSL_NO_DTLS1_3
+    ADD_ALL_TESTS(test_dtls13_cid, 6);
+    ADD_ALL_TESTS(test_dtls13_cid_update, 5);
+    ADD_TEST(test_dtls13_cid_long);
+    ADD_ALL_TESTS(test_dtls13_cid_early_data, 2);
+    ADD_TEST(test_dtls13_cid_per_datagram);
+#endif
 #endif
 
     return 1;

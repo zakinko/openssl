@@ -866,7 +866,7 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
 #define SSL_DTLS_CID_MAX_LEN 255
 
 /**
- * @brief Enable the DTLS 1.2 "connection_id" extension and set the CID to
+ * @brief Enable the DTLS "connection_id" extension and set the CID to
  * receive.
  * @param s the DTLS connection
  * @param cid the CID the peer is asked to use when sending, or NULL
@@ -878,7 +878,7 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
 __owur int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len);
 
 /**
- * @brief Disable the DTLS 1.2 "connection_id" extension from the next
+ * @brief Disable the DTLS "connection_id" extension from the next
  * handshake on.
  * @param s the DTLS connection
  * @see SSL_clear_dtls_cid(3)
@@ -916,6 +916,30 @@ int SSL_set_dtls_rrc(SSL *s, int enable);
  * @see SSL_get_dtls_rrc(3)
  */
 int SSL_get_dtls_rrc(const SSL *s);
+
+/* RFC 9147 section 9, ConnectionIdUsage */
+#define SSL_DTLS_CID_IMMEDIATE 0
+#define SSL_DTLS_CID_SPARE 1
+
+/**
+ * @brief Send the peer a new CID to use when sending to us, in a DTLS 1.3
+ * NewConnectionId message (RFC 9147 section 9).
+ * @param s the DTLS 1.3 connection
+ * @param usage SSL_DTLS_CID_IMMEDIATE or SSL_DTLS_CID_SPARE
+ * @returns 1 if the message is queued, 0 on error
+ * @see SSL_dtls_new_connection_id(3)
+ */
+int SSL_dtls_new_connection_id(SSL *s, int usage);
+
+/**
+ * @brief Ask the peer for spare CIDs in a DTLS 1.3 RequestConnectionId
+ * message (RFC 9147 section 9).
+ * @param s the DTLS 1.3 connection
+ * @param num the number of CIDs wanted, 1 to 255
+ * @returns 1 if the message is queued, 0 on error
+ * @see SSL_dtls_request_connection_id(3)
+ */
+int SSL_dtls_request_connection_id(SSL *s, unsigned int num);
 
 #ifndef OPENSSL_NO_PSK
 /*
@@ -1160,7 +1184,15 @@ typedef enum {
     TLS_ST_CR_ACK,
     TLS_ST_CW_ACK,
     TLS_ST_SR_ACK,
-    TLS_ST_SW_ACK
+    TLS_ST_SW_ACK,
+    TLS_ST_CR_NEW_CONNECTION_ID,
+    TLS_ST_CW_NEW_CONNECTION_ID,
+    TLS_ST_SR_NEW_CONNECTION_ID,
+    TLS_ST_SW_NEW_CONNECTION_ID,
+    TLS_ST_CR_REQUEST_CONNECTION_ID,
+    TLS_ST_CW_REQUEST_CONNECTION_ID,
+    TLS_ST_SR_REQUEST_CONNECTION_ID,
+    TLS_ST_SW_REQUEST_CONNECTION_ID
 } OSSL_HANDSHAKE_STATE;
 
 /*

@@ -8524,7 +8524,7 @@ static uint16_t conn_peer_port(SSL *ssl)
  *   6: the client moves; the check times out (section 5.1, "If T expires,
  *      the peer address binding is not updated")
  */
-static int test_dtls12_listener_cid(int idx)
+static int listener_cid(int version, int idx)
 {
     static const unsigned char ccid[] = { 0xc1, 0xc2 };
     SSL_CTX *sctx = NULL, *cctx = NULL;
@@ -8541,7 +8541,7 @@ static int test_dtls12_listener_cid(int idx)
     peer_change_new_port = 0;
 
     if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
-            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            DTLS_client_method(), version, version,
             &sctx, &cctx, cert, privkey)))
         goto end;
     SSL_CTX_set_dtls_peer_addr_change_cb(sctx, peer_change_cb, NULL);
@@ -8608,6 +8608,14 @@ static int test_dtls12_listener_cid(int idx)
 
     if (!TEST_int_eq(SSL_get_dtls_rrc(serverssl), idx != 1 && idx != 2)
         || !TEST_int_eq(SSL_get_dtls_rrc(clientssl), idx != 1 && idx != 2))
+        goto end;
+
+    /* DTLS 1.3: the NewSessionTicket and its ACK go before the client moves */
+    if (version == DTLS1_3_VERSION
+        && (!TEST_true(SSL_write_ex(clientssl, "first", 5, &n))
+            || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+            || !TEST_true(SSL_write_ex(serverssl, "first", 5, &n))
+            || !TEST_true(dtls_read_with_retry(clientssl, buf, sizeof(buf), &n))))
         goto end;
 
     if (idx == 1 || idx == 2 || idx == 5 || idx == 6) {
@@ -8688,6 +8696,21 @@ end:
     SSL_CTX_free(cctx);
     return testresult;
 }
+
+static int test_dtls12_listener_cid(int idx)
+{
+    return listener_cid(DTLS1_2_VERSION, idx);
+}
+
+#ifndef OPENSSL_NO_DTLS1_3
+/* The cases of listener_cid() where the client moves, and the first */
+static int test_dtls13_listener_cid(int idx)
+{
+    static const int cases[] = { 0, 1, 2, 5, 6 };
+
+    return listener_cid(DTLS1_3_VERSION, cases[idx]);
+}
+#endif
 
 /*
  * Take the datagrams the client has sent off the wire and pass them on.  The
@@ -9028,6 +9051,9 @@ int setup_tests(void)
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_ALL_TESTS(test_dtls12_listener_cid, 7);
     ADD_TEST(test_dtls12_listener_cid_move_in_handshake);
+#ifndef OPENSSL_NO_DTLS1_3
+    ADD_ALL_TESTS(test_dtls13_listener_cid, 5);
+#endif
 #endif
 #endif
 

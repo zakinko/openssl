@@ -122,10 +122,16 @@ size_t dtls_get_rec_header_size(const OSSL_RECORD_LAYER *rl,
         && rl->cid_len != 0) {
         /* RFC 9146 section 4, Figure 3: the CID follows the sequence number */
         size = DTLS1_RT_HEADER_LENGTH + rl->cid_len;
-    } else if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(hdr_first_byte)
-        && ossl_assert(!DTLS13_UNI_HDR_CID_BIT_IS_SET(hdr_first_byte))) {
-        /* DTLSv1.3 unified record header */
+    } else if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(hdr_first_byte)) {
+        /*
+         * DTLSv1.3 unified record header (RFC 9147 section 4, Figure 3).
+         * With the C bit the CID follows the first byte, "length as
+         * negotiated"; a record layer without one never frames such a
+         * header (see dtls_get_more_records()).
+         */
         size = 1;
+        if (DTLS13_UNI_HDR_CID_BIT_IS_SET(hdr_first_byte))
+            size += rl->cid_len != 0 ? rl->cid_len : rl->frame_cid_len;
         size += DTLS13_UNI_HDR_SEQ_BIT_IS_SET(hdr_first_byte) ? 2 : 1;
         size += DTLS13_UNI_HDR_LEN_BIT_IS_SET(hdr_first_byte) ? 2 : 0;
     } else {
@@ -502,6 +508,19 @@ static int dtls13_plaintext_allows_type(const OSSL_RECORD_LAYER *rl, int type)
  * ssl->s3.rrec.data    - data
  * ssl->s3.rrec.length  - number of bytes
  */
+const unsigned char *dtls_cid_is_ours(const OSSL_RECORD_LAYER *rl,
+    const unsigned char *cid)
+{
+    size_t i;
+
+    if (memcmp(cid, rl->cid, rl->cid_len) == 0)
+        return rl->cid;
+    for (i = 0; i < rl->cid_more_num; i++)
+        if (memcmp(cid, rl->cid_more + i * rl->cid_len, rl->cid_len) == 0)
+            return rl->cid_more + i * rl->cid_len;
+    return NULL;
+}
+
 /*
  * Drop the rest of the datagram the current record came from.  A record whose
  * length cannot be found also leaves the place of the next record unknown, so
@@ -567,6 +586,10 @@ again:
             return OSSL_RECORD_RETURN_RETRY;
         }
 
+        /* read_n() takes a new datagram when nothing is left of the last */
+        if (TLS_BUFFER_get_left(&rl->rbuf) == 0)
+            rl->dgram_has_cid = 0;
+
         rret = rl->funcs->read_n(rl, DTLS1_RT_HEADER_LENGTH,
             TLS_BUFFER_get_len(&rl->rbuf), 0, 1, &nread);
         /* read timeout is handled by dtls1_read_bytes */
@@ -591,6 +614,7 @@ again:
 
         /* Pull apart the header into the DTLS1_RECORD */
         rr->type = (int)record_type;
+        rr->cid = NULL;
 
         /*-
          * rfc9147:
@@ -645,13 +669,81 @@ again:
             recseqnumlen = sbitisset ? 2 : 1;
             recseqnumoffs = sizeof(recseqnum) - recseqnumlen;
 
-            if (/* OpenSSL does not support connection IDs: silently discard */
-                cbitisset
-                /*
+            /*
+             * RFC 9147 section 9: "If no CID is negotiated, then the
+             * receiver MUST reject any records it receives that contain a
+             * CID."  Without its length the rest of the datagram cannot be
+             * framed either.  Section 4: "If a Connection ID is negotiated,
+             * then it MUST be contained in all datagrams", so a datagram
+             * whose records of this record layer's epoch start without it
+             * is rejected the same way; a later record of a datagram that
+             * has shown the CID may go without.  Records of other epochs
+             * are left to the epoch checks below: early data (epoch 1) is
+             * sent before the client knows the server's CID, and goes
+             * without.  A CID that is not ours is rejected too: "If the
+             * second or later record has a connection ID which does not
+             * correspond to the same association used for previous
+             * records, the rest of the datagram MUST be discarded."
+             */
+            /*
+             * A record layer from before the CID frames records with the CID
+             * we sent (frame_cid) and keeps them for the next one, which
+             * checks them in full.
+             */
+            size_t cidlen = rl->cid_len != 0 ? rl->cid_len : rl->frame_cid_len;
+
+            if ((cbitisset && cidlen == 0)
+                || (!cbitisset && rl->cid_len != 0 && !rl->dgram_has_cid
+                    && (rl->epoch & DTLS13_UNI_HDR_EPOCH_BITS_MASK) == eebits)) {
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
+            }
+            if (cbitisset) {
+                PACKET cid;
+                size_t want = 1 + cidlen + recseqnumlen + (lbitisset ? 2 : 0);
+                size_t cidread = 0;
+
+                if (want > rl->packet_length) {
+                    size_t need = want - rl->packet_length;
+
+                    rret = rl->funcs->read_n(rl, need, need, 1, 0, &cidread);
+                    if (rret < OSSL_RECORD_RETURN_SUCCESS || cidread != need) {
+                        if (rl->alert != SSL_AD_NO_ALERT)
+                            return OSSL_RECORD_RETURN_FATAL;
+                        dtls_discard_datagram(rl);
+                        rr->length = 0;
+                        goto again;
+                    }
+                    nread += cidread;
+                    /* read_n() with extend may have moved rl->packet */
+                    if (!PACKET_buf_init(&dtlsrecord, rl->packet,
+                            rl->packet_length)
+                        || !PACKET_forward(&dtlsrecord, 1)) {
+                        dtls_discard_datagram(rl);
+                        rr->length = 0;
+                        goto again;
+                    }
+                }
+                if (!PACKET_get_sub_packet(&dtlsrecord, &cid, cidlen)
+                    || (rl->cid_len != 0
+                            ? (rr->cid = dtls_cid_is_ours(rl,
+                                   PACKET_data(&cid)))
+                                == NULL
+                            : memcmp(PACKET_data(&cid), rl->frame_cid, cidlen)
+                                != 0)) {
+                    dtls_discard_datagram(rl);
+                    rr->length = 0;
+                    goto again;
+                }
+                rl->dgram_has_cid = 1;
+            }
+
+            if (/*
                  * Naive approach? We expect sequence number to be filled already
                  * and then override the last bytes of the sequence number.
                  */
-                || !PACKET_copy_bytes(&dtlsrecord, recseqnum + recseqnumoffs, recseqnumlen)
+                !PACKET_copy_bytes(&dtlsrecord, recseqnum + recseqnumoffs, recseqnumlen)
                 /*
                  * rfc9147:
                  * The length field MAY be omitted by clearing the L bit, which means
@@ -695,6 +787,25 @@ again:
                     rl->packet_length = 0;
                     goto again;
                 }
+            }
+
+            /*
+             * |frame_cid| only finds the end of a record that is kept for
+             * the record layer of the next epoch.  A record that the keys
+             * at hand are to open was not sent with a CID if they have
+             * none: a server reading early data, say, is sent it without
+             * (above).  It is invalid and goes with its datagram (RFC 9147
+             * section 4.5.2); so does a record for the previous epoch's
+             * keys that has not the CID they expect.
+             */
+            if (epoch64 == crypto_rl->epoch
+                && (cbitisset ? (rr->cid == NULL
+                                    || crypto_rl->cid_len != rl->cid_len)
+                              : (crypto_rl != rl && crypto_rl->cid_len != 0
+                                    && !rl->dgram_has_cid))) {
+                dtls_discard_datagram(rl);
+                rr->length = 0;
+                goto again;
             }
         } else if (rr->type == SSL3_RT_TLS12_CID
             && rl->version != DTLS1_3_VERSION) {
@@ -753,7 +864,7 @@ again:
              * invalid here (RFC 6347 section 4.1.2.7).  The CID is not
              * secret, so the comparison need not be constant time.
              */
-            if (memcmp(PACKET_data(&cid), rl->cid, rl->cid_len) != 0) {
+            if (dtls_cid_is_ours(rl, PACKET_data(&cid)) == NULL) {
                 rr->length = 0;
                 rl->packet_length = 0;
                 goto again;
@@ -855,8 +966,11 @@ again:
      * real end of the header, which rl->packet[0] gives again on re-entry.
      */
     bodyoff = DTLS1_RT_HEADER_LENGTH;
-    if (rl->packet[0] == SSL3_RT_TLS12_CID && rl->version != DTLS1_3_VERSION
-        && rl->cid_len != 0)
+    if ((rl->version != DTLS1_3_VERSION && rl->cid_len != 0
+            && rl->packet[0] == SSL3_RT_TLS12_CID)
+        || ((rl->cid_len != 0 || rl->frame_cid_len != 0)
+            && DTLS13_UNI_HDR_FIX_BITS_IS_SET(rl->packet[0])
+            && DTLS13_UNI_HDR_CID_BIT_IS_SET(rl->packet[0])))
         bodyoff = dtls_get_rec_header_size(rl, rl->packet[0]);
     if (rr->length > rl->packet_length - bodyoff) {
         /* now rl->packet_length == DTLS1_RT_HEADER_LENGTH */
@@ -1319,7 +1433,8 @@ int dtls_prepare_record_header(OSSL_RECORD_LAYER *rl,
 
     if (unifiedheader) {
         uint8_t fixedbits = 0x20;
-        uint8_t cbit = 0;
+        /* RFC 9147 section 4: "The C bit (0x10) is set if the Connection ID is present." */
+        uint8_t cbit = rl->cid_len != 0 ? DTLS13_UNI_HDR_CID_BIT : 0;
         uint8_t sbit = DTLS13_UNI_HDR_SEQ_BIT;
         uint8_t lbit = DTLS13_UNI_HDR_LEN_BIT;
         uint8_t ebits = rl->epoch & DTLS13_UNI_HDR_EPOCH_BITS_MASK;
@@ -1330,6 +1445,7 @@ int dtls_prepare_record_header(OSSL_RECORD_LAYER *rl,
         seqnum = rl->sequence & DTLS13_UNI_HDR_SEQ_MASK(sbit ? 2 : 1);
 
         if (!WPACKET_put_bytes_u8(thispkt, unifiedhdrbits)
+            || (cbit != 0 && !WPACKET_memcpy(thispkt, rl->cid, rl->cid_len))
             || (sbit ? !WPACKET_put_bytes_u16(thispkt, seqnum)
                      : !WPACKET_put_bytes_u8(thispkt, seqnum))
             || !WPACKET_start_sub_packet_u16(thispkt)

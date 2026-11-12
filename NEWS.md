@@ -29,6 +29,9 @@ OpenSSL 4.2
 
 ### Major changes between OpenSSL 4.1 and OpenSSL 4.2 [under development]
 
+  * Added support for DTLS Connection IDs ([RFC 9146], and [RFC 9147] for
+    DTLS 1.3) and the Return Routability Check ([RFC 9853]).
+
   * Added support for Java keytool PKCS#12 files with symmetric keys.
     New API `PKCS12_parse_ex()` with `PKCS12_PARSE_CTX` has been added.
 
@@ -2685,8 +2688,10 @@ OpenSSL 0.9.x
 [RFC 8422]: https://datatracker.ietf.org/doc/html/rfc8422
 [RFC 8701]: https://datatracker.ietf.org/doc/html/rfc8701
 [RFC 8998]: https://datatracker.ietf.org/doc/html/rfc8998#name-iana-considerations
+[RFC 9146]: https://datatracker.ietf.org/doc/html/rfc9146
 [RFC 9147]: https://datatracker.ietf.org/doc/html/rfc9147
 [RFC 9849]: https://datatracker.ietf.org/doc/html/rfc9849
+[RFC 9853]: https://datatracker.ietf.org/doc/html/rfc9853
 [SP 800-185]: https://csrc.nist.gov/pubs/sp/800/185/final
 [SP 800-208]: https://csrc.nist.gov/pubs/sp/800/208/final
 [issue tracker]: https://github.com/openssl/openssl/issues
