@@ -1348,6 +1348,15 @@ struct ssl_st {
     CRYPTO_EX_DATA ex_data;
 };
 
+/*
+ * DTLS 1.3 CID updates (RFC 9147 section 9): at most this many of our own
+ * further CIDs outstanding, and of the peer's spare CIDs kept.  "An endpoint
+ * MAY handle requests which it considers excessive by responding with a
+ * NewConnectionId message containing fewer than num_cids CIDs".
+ */
+#define DTLS_CID_MAX_SPARES 4
+#define DTLS_CID_MAX_OWN_MORE 8
+
 struct ssl_connection_st {
     /* type identifier and common data */
     struct ssl_st ssl;
@@ -1939,6 +1948,29 @@ struct ssl_connection_st {
             bool rrc_disabled;
             bool rrc_received;
             bool rrc_negotiated;
+            /*
+             * DTLS 1.3 CID updates (RFC 9147 section 9).  |own_more| holds
+             * the further CIDs of our own we gave the peer, each |sent_len|
+             * bytes: the length is not on the wire, so every CID we receive
+             * has to have the one length (RFC 9146 section 3).  |spares| are
+             * the peer's spare CIDs, kept until used; "Implementations
+             * which receive more spare CIDs than they wish to maintain MAY
+             * simply discard any extra CIDs."  |ncid_pending| and
+             * |rcid_num| are messages waiting to be sent; |rcid_unfulfilled|
+             * is a RequestConnectionId sent and not yet answered.
+             */
+            unsigned char *own_more;
+            size_t own_more_num;
+            struct {
+                size_t len;
+                unsigned char cid[SSL_DTLS_CID_MAX_LEN];
+            } spares[DTLS_CID_MAX_SPARES];
+            size_t spares_num;
+            int ncid_pending;
+            int ncid_usage;
+            size_t ncid_num;
+            unsigned int rcid_num;
+            bool rcid_unfulfilled;
         } dtls_cid;
 
         /* Is the session perhaps suitable for early data? */
@@ -2251,6 +2283,14 @@ static ossl_inline int dtls_msg_needs_ack(int sentbyserver, unsigned char msgtyp
     switch (msgtype) {
     case SSL3_MT_NEWSESSION_TICKET:
     case SSL3_MT_KEY_UPDATE:
+    /*
+     * RFC 9147 section 5.8.4 lists NewConnectionId and
+     * RequestConnectionId among the post-handshake messages, and section
+     * 7: "For post-handshake messages, ACKs SHOULD be sent once for
+     * each received and processed handshake record".
+     */
+    case SSL3_MT_NEW_CONNECTION_ID:
+    case SSL3_MT_REQUEST_CONNECTION_ID:
         return 1;
 
     case SSL3_MT_CERTIFICATE:
@@ -3235,6 +3275,26 @@ size_t ossl_dtls_listener_cid_len(SSL *s);
  * @param seq the record's sequence number
  */
 void ossl_dtls_note_record(SSL_CONNECTION *s, uint64_t epoch, uint64_t seq);
+
+/**
+ * @brief Is @p st a state that writes a NewConnectionId or
+ * RequestConnectionId message (RFC 9147 section 9)?
+ * @param st the handshake state
+ * @returns 1 if it is, 0 otherwise
+ */
+int ossl_statem_is_cid_update_write(OSSL_HANDSHAKE_STATE st);
+
+/**
+ * @brief Register a further CID of a listener's connection, so that the
+ * listener routes records carrying it to the connection.
+ * @param s the listener, may be NULL
+ * @param conn the connection
+ * @param cid the CID
+ * @param cid_len its length, which must be the listener's
+ * @returns 1 on success, 0 if the CID is taken or on error
+ */
+int ossl_dtls_listener_add_conn_cid(SSL *s, SSL *conn, const unsigned char *cid,
+    size_t cid_len);
 
 /**
  * @brief Process a return_routability_check record (RFC 9853 section 4).
