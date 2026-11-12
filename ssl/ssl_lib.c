@@ -4222,6 +4222,32 @@ void SSL_clear_dtls_cid(SSL *s)
 }
 
 /*
+ * SSL_set_dtls_rrc turns the Return Routability Check (RFC 9853) on or off
+ * for the next handshake.  It is on by default: "A client offering the
+ * connection_id extension SHOULD also offer the rrc extension, unless the
+ * application using DTLS has its own address validation mechanism"
+ * (section 3).
+ */
+int SSL_set_dtls_rrc(SSL *s, int enable)
+{
+    SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
+
+    if (sc == NULL || !SSL_CONNECTION_IS_DTLS(sc)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+    sc->ext.dtls_cid.rrc_disabled = !enable;
+    return 1;
+}
+
+int SSL_get_dtls_rrc(const SSL *s)
+{
+    const SSL_CONNECTION *sc = SSL_CONNECTION_FROM_CONST_SSL(s);
+
+    return sc != NULL && sc->ext.dtls_cid.rrc_negotiated;
+}
+
+/*
  * SSL_get0_dtls_cid returns 1 if the "connection_id" extension was negotiated
  * in the last handshake, and 0 otherwise.  |own| is the CID in the records we
  * receive and |peer| the CID in the records we send; either may have a zero

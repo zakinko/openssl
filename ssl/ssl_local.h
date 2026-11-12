@@ -772,6 +772,7 @@ typedef enum tlsext_index_en {
     TLSEXT_IDX_use_srtp,
     TLSEXT_IDX_encrypt_then_mac,
     TLSEXT_IDX_connection_id,
+    TLSEXT_IDX_rrc,
     TLSEXT_IDX_signed_certificate_timestamp,
     TLSEXT_IDX_extended_master_secret,
     TLSEXT_IDX_signature_algorithms_cert,
@@ -1930,6 +1931,14 @@ struct ssl_connection_st {
             size_t sent_len;
             unsigned char *peer;
             size_t peer_len;
+            /*
+             * Return Routability Check (RFC 9853), which needs the CID:
+             * "A client offering the rrc extension MUST also offer the
+             * connection_id extension" (section 3).
+             */
+            bool rrc_disabled;
+            bool rrc_received;
+            bool rrc_negotiated;
         } dtls_cid;
 
         /* Is the session perhaps suitable for early data? */
@@ -2326,6 +2335,15 @@ typedef struct dtls1_state_st {
     int have_newest;
     uint64_t newest_epoch;
     uint64_t newest_seq;
+
+    /*
+     * A Return Routability Check (RFC 9853 section 5.1) in progress: the
+     * cookie sent in a path_challenge to |rrc_addr|, and when to give up.
+     */
+    int rrc_pending;
+    unsigned char rrc_cookie[8];
+    BIO_ADDR rrc_addr;
+    OSSL_TIME rrc_deadline;
 #endif
 
 #ifndef OPENSSL_NO_DTLS
@@ -3217,6 +3235,15 @@ size_t ossl_dtls_listener_cid_len(SSL *s);
  * @param seq the record's sequence number
  */
 void ossl_dtls_note_record(SSL_CONNECTION *s, uint64_t epoch, uint64_t seq);
+
+/**
+ * @brief Process a return_routability_check record (RFC 9853 section 4).
+ * @param s the connection
+ * @param data the record's content
+ * @param len the length of @p data
+ */
+void ossl_dtls_rrc_record(SSL_CONNECTION *s, const unsigned char *data,
+    size_t len);
 
 void ossl_dtls_listener_unregister_established_conn(SSL *s,
     const BIO_ADDR *peer_addr);

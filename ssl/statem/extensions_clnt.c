@@ -722,6 +722,31 @@ EXT_RETURN tls_construct_ctos_connection_id(SSL_CONNECTION *s, WPACKET *pkt,
     return EXT_RETURN_SENT;
 }
 
+/*
+ * RFC 9853 section 3: "A client offering the rrc extension MUST also offer
+ * the connection_id extension", and "A client offering the connection_id
+ * extension SHOULD also offer the rrc extension, unless the application
+ * using DTLS has its own address validation mechanism."  The extension data
+ * is empty.
+ */
+EXT_RETURN tls_construct_ctos_rrc(SSL_CONNECTION *s, WPACKET *pkt,
+    unsigned int context, X509 *x, size_t chainidx)
+{
+    if (!s->ext.dtls_cid.enabled || s->ext.dtls_cid.rrc_disabled)
+        return EXT_RETURN_NOT_SENT;
+#ifndef OPENSSL_NO_ECH
+    ECH_SAME_EXT(s, context, pkt)
+#endif
+
+    if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_rrc)
+        || !WPACKET_put_bytes_u16(pkt, 0)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return EXT_RETURN_FAIL;
+    }
+
+    return EXT_RETURN_SENT;
+}
+
 #ifndef OPENSSL_NO_CT
 EXT_RETURN tls_construct_ctos_sct(SSL_CONNECTION *s, WPACKET *pkt,
     unsigned int context,
@@ -2191,6 +2216,21 @@ int tls_parse_stoc_connection_id(SSL_CONNECTION *s, PACKET *pkt,
     }
 
     s->ext.dtls_cid.negotiated = 1;
+    return 1;
+}
+
+/*
+ * The server answered our "rrc" extension (RFC 9853 section 3).  "The
+ * extension_data field of this extension is empty."
+ */
+int tls_parse_stoc_rrc(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
+    X509 *x, size_t chainidx)
+{
+    if (PACKET_remaining(pkt) != 0) {
+        SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    s->ext.dtls_cid.rrc_negotiated = 1;
     return 1;
 }
 

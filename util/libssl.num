@@ -630,3 +630,5 @@ SSL_set1_dtls_cid                       ?	4_2_0	EXIST::FUNCTION:
 SSL_clear_dtls_cid                      ?	4_2_0	EXIST::FUNCTION:
 SSL_get0_dtls_cid                       ?	4_2_0	EXIST::FUNCTION:
 SSL_CTX_set_dtls_peer_addr_change_cb    ?	4_2_0	EXIST::FUNCTION:
+SSL_set_dtls_rrc                        ?	4_2_0	EXIST::FUNCTION:
+SSL_get_dtls_rrc                        ?	4_2_0	EXIST::FUNCTION:
