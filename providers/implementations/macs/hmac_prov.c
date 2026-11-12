@@ -60,7 +60,13 @@ struct hmac_data_st {
     size_t keylen;
     /* Length of full TLS record including the MAC and any padding */
     size_t tls_data_size;
-    unsigned char tls_header[13];
+    /*
+     * The record header the first update carries, of |tls_header_size|
+     * bytes: 13 for TLS, more for DTLS 1.2 with a Connection ID (RFC 9146
+     * section 5.1).
+     */
+    unsigned char tls_header[SSL3_CBC_MAX_HEADER_LENGTH];
+    size_t tls_header_size;
     int tls_header_set;
     unsigned char tls_mac_out[EVP_MAX_MD_SIZE];
     size_t tls_mac_out_size;
@@ -88,6 +94,7 @@ static void *hmac_new(void *provctx)
         return NULL;
     }
     macctx->provctx = provctx;
+    macctx->tls_header_size = SSL3_CBC_TLS_HEADER_LENGTH;
     OSSL_FIPS_IND_INIT(macctx)
 
     return macctx;
@@ -221,7 +228,7 @@ static int hmac_update(void *vmacctx, const unsigned char *data,
         /* We're doing a TLS HMAC */
         if (!macctx->tls_header_set) {
             /* We expect the first update call to contain the TLS header */
-            if (datalen != sizeof(macctx->tls_header))
+            if (datalen != macctx->tls_header_size)
                 return 0;
             memcpy(macctx->tls_header, data, datalen);
             macctx->tls_header_set = 1;
@@ -235,6 +242,7 @@ static int hmac_update(void *vmacctx, const unsigned char *data,
             macctx->tls_mac_out,
             &macctx->tls_mac_out_size,
             macctx->tls_header,
+            macctx->tls_header_size,
             data,
             datalen,
             macctx->tls_data_size,
@@ -337,6 +345,16 @@ static int hmac_set_ctx_params(void *vmacctx, const OSSL_PARAM params[])
 
     if (p.tlssize != NULL && !OSSL_PARAM_get_size_t(p.tlssize, &macctx->tls_data_size))
         return 0;
+
+    if (p.tlshdr != NULL) {
+        size_t hdr;
+
+        if (!OSSL_PARAM_get_size_t(p.tlshdr, &hdr)
+            || hdr < SSL3_CBC_TLS_HEADER_LENGTH
+            || hdr > SSL3_CBC_MAX_HEADER_LENGTH)
+            return 0;
+        macctx->tls_header_size = hdr;
+    }
 
     return 1;
 }
