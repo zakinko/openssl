@@ -105,6 +105,9 @@ B<openssl> B<s_server>
 [B<-srpuserseed> I<val>]
 [B<-timeout>]
 [B<-mtu> I<+int>]
+[B<-dtls_cid> I<hex>]
+[B<-dtls_cid_prefix> I<hex>]
+[B<-no_dtls_rrc>]
 [B<-listen>]
 [B<-sctp>]
 [B<-sctp_label_bug>]
@@ -655,6 +658,29 @@ Enable timeouts.
 
 Set link-layer MTU.
 
+=item B<-dtls_cid> I<hex>
+
+Accept the DTLS Connection ID extension (RFC 9146, and RFC 9147 for DTLSv1.3)
+from a client that offers it, asking the client to send its records with the
+Connection ID I<hex>, given as a string of hexadecimal digits. An empty string
+asks for an empty Connection ID: the server then sends with the client's
+Connection ID but receives records without one. The Connection IDs that were
+negotiated are printed with the connection information. See
+L<SSL_set1_dtls_cid(3)>.
+
+=item B<-dtls_cid_prefix> I<hex>
+
+Start the further Connection IDs that the server gives a DTLSv1.3 client, in
+NewConnectionId messages, with the bytes I<hex>, given as a string of
+hexadecimal digits; the bytes after them are random. I<hex> has to be shorter
+than the Connection ID given with B<-dtls_cid>. Without this option the
+further Connection IDs are random. See L<SSL_CTX_set_dtls_new_cid_cb(3)>.
+
+=item B<-no_dtls_rrc>
+
+Do not accept the DTLS Return Routability Check (RFC 9853), which is otherwise
+accepted together with the Connection ID.
+
 =item B<-psk_identity> I<val>
 
 Expect the client to send PSK identity I<val> when using a PSK
@@ -1015,6 +1041,9 @@ The B<ech> options were added in OpenSSL 4.0.
 The B<-engine> option was removed in OpenSSL 4.0.
 
 The B<-expected-rpks> option was added in OpenSSL 4.0.
+
+The B<-dtls_cid>, B<-dtls_cid_prefix> and B<-no_dtls_rrc> options were added
+in OpenSSL 4.2.
 
 =head1 COPYRIGHT
 

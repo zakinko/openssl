@@ -559,6 +559,8 @@ typedef enum OPTION_choice {
     OPT_SCTP,
     OPT_TIMEOUT,
     OPT_MTU,
+    OPT_DTLS_CID,
+    OPT_NO_DTLS_RRC,
     OPT_KEYFORM,
     OPT_PASS,
     OPT_CERT_CHAIN,
@@ -810,6 +812,10 @@ const OPTIONS s_client_options[] = {
     { "timeout", OPT_TIMEOUT, '-',
         "Enable send/receive timeout on DTLS connections" },
     { "mtu", OPT_MTU, 'p', "Set the link layer MTU" },
+    { "dtls_cid", OPT_DTLS_CID, 's',
+        "Offer the DTLS Connection ID extension with this CID, in hex (may be empty)" },
+    { "no_dtls_rrc", OPT_NO_DTLS_RRC, '-',
+        "Do not offer the DTLS Return Routability Check" },
 #endif
 #ifndef OPENSSL_NO_DTLS1
     { "dtls1", OPT_DTLS1, '-', "Just use DTLSv1" },
@@ -1050,6 +1056,8 @@ int s_client_main(int argc, char **argv)
 #ifndef OPENSSL_NO_DTLS
     int enable_timeouts = 0;
     long socket_mtu = 0;
+    const char *dtls_cid = NULL;
+    int no_dtls_rrc = 0;
 #endif
 #if defined(OPENSSL_SYS_WINDOWS) || defined(OPENSSL_SYS_MSDOS)
     struct timeval tv;
@@ -1544,6 +1552,16 @@ int s_client_main(int argc, char **argv)
 #ifndef OPENSSL_NO_DTLS
             if (!opt_long(opt_arg(), &socket_mtu))
                 goto opthelp;
+#endif
+            break;
+        case OPT_DTLS_CID:
+#ifndef OPENSSL_NO_DTLS
+            dtls_cid = opt_arg();
+#endif
+            break;
+        case OPT_NO_DTLS_RRC:
+#ifndef OPENSSL_NO_DTLS
+            no_dtls_rrc = 1;
 #endif
             break;
         case OPT_FALLBACKSCSV:
@@ -2565,6 +2583,14 @@ re_start:
             /* want to do MTU discovery */
             BIO_ctrl(sbio, BIO_CTRL_DGRAM_MTU_DISCOVER, 0, NULL);
         }
+
+        if (dtls_cid != NULL && !set_dtls_cid_hex(con, dtls_cid)) {
+            BIO_printf(bio_err, "Invalid DTLS Connection ID: %s\n", dtls_cid);
+            BIO_free(sbio);
+            goto shut;
+        }
+        if (no_dtls_rrc)
+            SSL_set_dtls_rrc(con, 0);
     } else
 #endif /* OPENSSL_NO_DTLS */
 #ifndef OPENSSL_NO_QUIC
@@ -3983,6 +4009,8 @@ static void print_stuff(BIO *bio, SSL *s, int full)
     }
 #endif
 
+    print_dtls_cid(bio, s);
+
     if (SSL_version(s) == version1_3) {
         switch (SSL_get_early_data_status(s)) {
         case SSL_EARLY_DATA_NOT_SENT:
@@ -4290,6 +4318,8 @@ static int user_data_add(struct user_data_st *user_data, size_t i)
 #define USER_COMMAND_RENEGOTIATE 3
 #define USER_COMMAND_KEY_UPDATE 4
 #define USER_COMMAND_FIN 5
+#define USER_COMMAND_NEW_CID 6
+#define USER_COMMAND_REQUEST_CID 7
 
 static int user_data_execute(struct user_data_st *user_data, int cmd, char *arg)
 {
@@ -4312,6 +4342,12 @@ static int user_data_execute(struct user_data_st *user_data, int cmd, char *arg)
                               "                     Arguments:\n"
                               "                     req   = peer update requested (default)\n"
                               "                     noreq = peer update not requested\n");
+            if (SSL_is_dtls(user_data->con))
+                BIO_puts(bio_err, "  {newcid:spare|immediate}: Send a New Connection ID message\n"
+                                  "                     Arguments:\n"
+                                  "                     spare     = peer may use the new CID (default)\n"
+                                  "                     immediate = peer must use the new CID\n"
+                                  "  {reqcid:num}: Request num new Connection IDs (default 1)\n");
         } else {
             BIO_puts(bio_err, "  {reneg}: Attempt to renegotiate\n");
         }
@@ -4355,6 +4391,38 @@ static int user_data_execute(struct user_data_st *user_data, int cmd, char *arg)
             break;
         user_data->isfin = 1;
         return USER_DATA_PROCESS_NO_DATA;
+
+    case USER_COMMAND_NEW_CID: {
+        int usage;
+
+        if (OPENSSL_strcasecmp(arg, "spare") == 0)
+            usage = SSL_DTLS_CID_SPARE;
+        else if (OPENSSL_strcasecmp(arg, "immediate") == 0)
+            usage = SSL_DTLS_CID_IMMEDIATE;
+        else
+            return USER_DATA_PROCESS_BAD_ARGUMENT;
+        BIO_puts(bio_err, "NEWCONNECTIONID\n");
+        /* Not being able to queue one does not end the connection */
+        if (!SSL_dtls_new_connection_id(user_data->con, usage)) {
+            BIO_puts(bio_err, "NOT SENT\n");
+            ERR_print_errors(bio_err);
+        }
+        return USER_DATA_PROCESS_CONTINUE;
+    }
+
+    case USER_COMMAND_REQUEST_CID: {
+        char *end;
+        long num = strtol(arg, &end, 10);
+
+        if (*arg == '\0' || *end != '\0' || num < 1 || num > 255)
+            return USER_DATA_PROCESS_BAD_ARGUMENT;
+        BIO_puts(bio_err, "REQUESTCONNECTIONID\n");
+        if (!SSL_dtls_request_connection_id(user_data->con, (unsigned int)num)) {
+            BIO_puts(bio_err, "NOT SENT\n");
+            ERR_print_errors(bio_err);
+        }
+        return USER_DATA_PROCESS_CONTINUE;
+    }
 
     default:
         break;
@@ -4461,6 +4529,16 @@ static int user_data_process(struct user_data_st *user_data, size_t *len,
                     cmd = USER_COMMAND_KEY_UPDATE;
                     if (arg_start == NULL)
                         arg_start = "req";
+                } else if (SSL_is_dtls(user_data->con)
+                    && OPENSSL_strcasecmp(cmd_start, "newcid") == 0) {
+                    cmd = USER_COMMAND_NEW_CID;
+                    if (arg_start == NULL)
+                        arg_start = "spare";
+                } else if (SSL_is_dtls(user_data->con)
+                    && OPENSSL_strcasecmp(cmd_start, "reqcid") == 0) {
+                    cmd = USER_COMMAND_REQUEST_CID;
+                    if (arg_start == NULL)
+                        arg_start = "1";
                 }
             } else {
                 /* (D)TLSv1.2 or below */
