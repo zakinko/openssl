@@ -820,6 +820,11 @@ static int use_pem_cert(SSL_CTX *ctx, const void *pem, size_t pem_len)
     return rv;
 }
 
+/* The CID the server asks for; any value will do */
+static const unsigned char dtls_cid[] = {
+    0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x00, 0x01
+};
+
 int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 {
     SSL *server = NULL;
@@ -863,6 +868,13 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 
     server = SSL_new(ctx);
     if (server == NULL)
+        goto end;
+    /*
+     * Accept the Connection ID extension from a ClientHello that offers it,
+     * so that the records with a CID are reached too.  One that does not
+     * offer it is handled as before.
+     */
+    if (SSL_set1_dtls_cid(server, dtls_cid, sizeof(dtls_cid)) != 1)
         goto end;
     in = BIO_new(BIO_s_mem());
     if (in == NULL)
