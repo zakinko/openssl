@@ -1515,13 +1515,15 @@ static void dtls_listener_conn_free_locked(DTLS_LISTENER *dl, SSL *ssl)
 
 /*
  * Give a new connection a CID of the listener's length and register it.  The
- * CID is random: RFC 9146 section 8 notes that a CID "introduces the risk of
- * linkability", and a counter would also tell the number of connections.
- * The caller holds dl->mutex.
+ * CID is the one the application's callback chooses, or random: RFC 9146
+ * section 8 notes that a CID "introduces the risk of linkability", and a
+ * counter would also tell the number of connections.  The caller holds
+ * dl->mutex.
  */
 #define DTLS_LISTENER_CID_TRIES 8
 static int dtls_listener_assign_cid(DTLS_LISTENER *dl, SSL *ssl)
 {
+    SSL_CTX *ctx = dl->ssl.ctx;
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(ssl);
     unsigned char cid[SSL_DTLS_CID_MAX_LEN];
     int i;
@@ -1529,24 +1531,38 @@ static int dtls_listener_assign_cid(DTLS_LISTENER *dl, SSL *ssl)
     if (sc == NULL)
         return 0;
 
-    for (i = 0; i < DTLS_LISTENER_CID_TRIES; i++) {
-        if (RAND_bytes_ex(dl->ssl.ctx->libctx, cid, dl->cid_len, 0) <= 0)
+    if (ctx->dtls_new_cid_cb != NULL) {
+        /*
+         * The application answers for the CIDs it chooses: with none to
+         * give, or one that another connection has, there is no connection.
+         */
+        /* As for new_pending_conn_cb: being_driven keeps the tick away */
+        sc->listener_being_driven = 1;
+        ossl_crypto_mutex_unlock(dl->mutex);
+        i = ctx->dtls_new_cid_cb(ssl, cid, dl->cid_len, ctx->dtls_new_cid_arg);
+        ossl_crypto_mutex_lock(dl->mutex);
+        sc->listener_being_driven = 0;
+        if (!i)
             return 0;
-        if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) == NULL)
-            break;
+        if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) != NULL) {
+            ERR_raise(ERR_LIB_SSL, SSL_R_DTLS_CID_CALLBACK_FAILURE);
+            return 0;
+        }
+    } else {
+        for (i = 0; i < DTLS_LISTENER_CID_TRIES; i++) {
+            if (RAND_bytes_ex(ctx->libctx, cid, dl->cid_len, 0) <= 0)
+                return 0;
+            if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) == NULL)
+                break;
+        }
+        /* A short CID length can run out of values; refuse the connection */
+        if (i == DTLS_LISTENER_CID_TRIES)
+            return 0;
     }
-    /* A short CID length can run out of values; refuse the connection */
-    if (i == DTLS_LISTENER_CID_TRIES)
-        return 0;
 
-    if (!SSL_set1_dtls_cid(ssl, cid, dl->cid_len))
-        return 0;
-    if (!ossl_dgram_cid_lookup_register(dl->cid_conns, cid, dl->cid_len, ssl,
-            &sc->listener_cids)) {
-        SSL_clear_dtls_cid(ssl);
-        return 0;
-    }
-    return 1;
+    return ossl_dtls_cid_set_own(sc, cid, dl->cid_len)
+        && ossl_dgram_cid_lookup_register(dl->cid_conns, cid, dl->cid_len, ssl,
+            &sc->listener_cids);
 }
 
 /*
@@ -1623,9 +1639,6 @@ static SSL *dtls_listener_create_conn_ssl(DTLS_LISTENER *dl,
         goto err;
 
     SSL_set_accept_state(ssl);
-
-    if (dl->cid_len != 0 && !dtls_listener_assign_cid(dl, ssl))
-        goto err;
 
     /*
      * Create DTLS_RX for this connection. The demux is owned by the listener
@@ -1794,6 +1807,12 @@ static void dtls_listener_packet_handler(DGRAM_URXE *urxe, void *arg)
         }
         if ((sc = SSL_CONNECTION_FROM_SSL_ONLY(conn_ssl)) != NULL)
             sc->listener_pending = 1;
+
+        if (dl->cid_len != 0 && !dtls_listener_assign_cid(dl, conn_ssl)) {
+            ossl_dgram_conn_lookup_unregister(dl->pending_conns, &urxe->peer);
+            dtls_listener_conn_free_locked(dl, conn_ssl);
+            goto release;
+        }
 
         /*
          * Give the application a chance to decorate or veto the new
