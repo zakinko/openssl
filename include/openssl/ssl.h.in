@@ -2094,6 +2094,30 @@ typedef int (*SSL_dtls_peer_addr_change_cb_fn)(SSL *s,
 void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
     SSL_dtls_peer_addr_change_cb_fn cb, void *arg);
 
+/**
+ * @brief Callback that chooses a DTLS Connection ID for a connection to
+ * receive with, where the library would otherwise make a random one.
+ * @param s the connection
+ * @param cid where to write the CID
+ * @param cid_len the length of the CID to write, which is fixed
+ * @param arg the argument given to SSL_CTX_set_dtls_new_cid_cb()
+ * @returns 1 with @p cid written, 0 if there is no CID to give
+ * @see SSL_CTX_set_dtls_new_cid_cb(3)
+ */
+typedef int (*SSL_dtls_new_cid_cb_fn)(SSL *s, unsigned char *cid,
+    size_t cid_len, void *arg);
+
+/**
+ * @brief Set the callback that chooses the DTLS Connection IDs the library
+ * gives out for connections made from @p c.
+ * @param c the SSL_CTX
+ * @param cb the callback, or NULL for random Connection IDs
+ * @param arg passed to @p cb
+ * @see SSL_CTX_set_dtls_new_cid_cb(3)
+ */
+void SSL_CTX_set_dtls_new_cid_cb(SSL_CTX *c, SSL_dtls_new_cid_cb_fn cb,
+    void *arg);
+
 #ifndef OPENSSL_NO_DEPRECATED_4_0
 OSSL_DEPRECATEDIN_4_0 int SSL_client_hello_isv2(SSL *s);
 #endif

@@ -7608,6 +7608,13 @@ void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
     c->dtls_peer_addr_change_arg = arg;
 }
 
+void SSL_CTX_set_dtls_new_cid_cb(SSL_CTX *c, SSL_dtls_new_cid_cb_fn cb,
+    void *arg)
+{
+    c->dtls_new_cid_cb = cb;
+    c->dtls_new_cid_arg = arg;
+}
+
 #ifndef OPENSSL_NO_DEPRECATED_4_0
 int SSL_client_hello_isv2(SSL *s)
 {

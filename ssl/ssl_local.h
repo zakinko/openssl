@@ -1076,6 +1076,10 @@ struct ssl_ctx_st {
     SSL_dtls_peer_addr_change_cb_fn dtls_peer_addr_change_cb;
     void *dtls_peer_addr_change_arg;
 
+    /* Callback choosing the DTLS Connection IDs we give out, else random */
+    SSL_dtls_new_cid_cb_fn dtls_new_cid_cb;
+    void *dtls_new_cid_arg;
+
     /* TLS extensions. */
     struct {
         /* TLS extensions servername callback */

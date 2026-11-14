@@ -13,6 +13,8 @@ SSL_DTLS_CID_IMMEDIATE,
 SSL_DTLS_CID_SPARE,
 SSL_CTX_set_dtls_peer_addr_change_cb,
 SSL_dtls_peer_addr_change_cb_fn,
+SSL_CTX_set_dtls_new_cid_cb,
+SSL_dtls_new_cid_cb_fn,
 SSL_DTLS_CID_MAX_LEN
 - DTLS Connection ID
 
@@ -43,6 +45,11 @@ SSL_DTLS_CID_MAX_LEN
  void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
                                            SSL_dtls_peer_addr_change_cb_fn cb,
                                            void *arg);
+
+ typedef int (*SSL_dtls_new_cid_cb_fn)(SSL *s, unsigned char *cid,
+                                       size_t cid_len, void *arg);
+ void SSL_CTX_set_dtls_new_cid_cb(SSL_CTX *c, SSL_dtls_new_cid_cb_fn cb,
+                                  void *arg);
 
 =head1 DESCRIPTION
 
@@ -117,6 +124,38 @@ the two it was, and a second of the same kind cannot be queued until the
 first has been acknowledged. Both fail on a connection that is not DTLS 1.3,
 has not finished its handshake, or did not negotiate a CID.
 
+=head2 Choosing the CIDs
+
+The CID of the handshake is the one given to SSL_set1_dtls_cid(). The other
+CIDs of a connection are made by the library: the further CIDs of DTLS 1.3,
+sent by SSL_dtls_new_connection_id() or in answer to a RequestConnectionId,
+and the first CID of a connection created by a DTLS listener that gives
+Connection IDs. They are random unless a callback is set with
+SSL_CTX_set_dtls_new_cid_cb() on the B<SSL_CTX> the connection was made from.
+An application that finds its connections by the CID itself, for example
+because the CID names one of several servers behind a load balancer, sets
+one to choose them.
+
+The callback is called with the connection I<s>, a buffer I<cid> to write
+the new CID to, and its length I<cid_len>, which is that of the CID of the
+handshake, or of the listener: the CID length is not carried in records, so
+the callback cannot change it. It returns 1 when it has written the CID and 0
+when it has none to give. With none, a listener does not create the
+connection; a NewConnectionId message is sent with the CIDs obtained so far,
+which may be none, and as spare CIDs then, whatever was asked of
+SSL_dtls_new_connection_id(). The callback is called once for each CID.
+
+The CIDs must differ from the other CIDs of the connection, and from those of
+the other connections of the listener, if any. A CID that is in use is an
+error of the application: the connection fails with
+B<SSL_R_DTLS_CID_CALLBACK_FAILURE>, or the listener does not create it. For
+the first CID of a listener's connection the callback is called while the
+listener is busy with the incoming datagram, and must not call functions on
+the listener.
+
+OpenSSL keeps no list of a connection's CIDs for the application to read; an
+application that needs to know them chooses them with this callback.
+
 =head2 Changes of peer address
 
 A connection created by a DTLS listener (see L<SSL_new_listener(3)>) that
@@ -189,7 +228,9 @@ SSL_set_dtls_rrc() returns 1 on success and 0 if I<s> is not a DTLS
 connection.
 
 SSL_dtls_new_connection_id() and SSL_dtls_request_connection_id() return 1 if
-the message has been queued and 0 otherwise. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
+the message has been queued and 0 otherwise. The callback set with
+SSL_CTX_set_dtls_new_cid_cb() returns 1 if it wrote a CID and 0 if it has
+none to give. SSL_get_dtls_rrc() returns 1 if the Return Routability Check was
 negotiated and 0 otherwise.
 
 =head1 SEE ALSO

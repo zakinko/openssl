@@ -1348,25 +1348,40 @@ static void dtls_listener_conn_free_locked(DTLS_LISTENER *dl, SSL *ssl)
 
 /*
  * Give a new connection a CID of the listener's length and register it.  The
- * CID is random: RFC 9146 section 8 notes that a CID "introduces the risk of
- * linkability", and a counter would also tell the number of connections.
- * The caller holds dl->mutex.
+ * CID is the one the application's callback chooses, or random: RFC 9146
+ * section 8 notes that a CID "introduces the risk of linkability", and a
+ * counter would also tell the number of connections.  The caller holds
+ * dl->mutex.
  */
 #define DTLS_LISTENER_CID_TRIES 8
 static int dtls_listener_assign_cid(DTLS_LISTENER *dl, SSL *ssl)
 {
+    SSL_CTX *ctx = dl->ssl.ctx;
     unsigned char cid[SSL_DTLS_CID_MAX_LEN];
     int i;
 
-    for (i = 0; i < DTLS_LISTENER_CID_TRIES; i++) {
-        if (RAND_bytes_ex(dl->ssl.ctx->libctx, cid, dl->cid_len, 0) <= 0)
+    if (ctx->dtls_new_cid_cb != NULL) {
+        /*
+         * The application answers for the CIDs it chooses: with none to
+         * give, or one that another connection has, there is no connection.
+         */
+        if (!ctx->dtls_new_cid_cb(ssl, cid, dl->cid_len, ctx->dtls_new_cid_arg))
             return 0;
-        if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) == NULL)
-            break;
+        if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) != NULL) {
+            ERR_raise(ERR_LIB_SSL, SSL_R_DTLS_CID_CALLBACK_FAILURE);
+            return 0;
+        }
+    } else {
+        for (i = 0; i < DTLS_LISTENER_CID_TRIES; i++) {
+            if (RAND_bytes_ex(ctx->libctx, cid, dl->cid_len, 0) <= 0)
+                return 0;
+            if (ossl_dgram_cid_lookup_find(dl->cid_conns, cid, dl->cid_len) == NULL)
+                break;
+        }
+        /* A short CID length can run out of values; refuse the connection */
+        if (i == DTLS_LISTENER_CID_TRIES)
+            return 0;
     }
-    /* A short CID length can run out of values; refuse the connection */
-    if (i == DTLS_LISTENER_CID_TRIES)
-        return 0;
 
     if (!SSL_set1_dtls_cid(ssl, cid, dl->cid_len))
         return 0;

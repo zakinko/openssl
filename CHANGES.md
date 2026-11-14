@@ -36,7 +36,9 @@ OpenSSL 4.2
  * Added support for Connection IDs in DTLS 1.3 ([RFC 9147]): the CID in
    the unified header, and the NewConnectionId and RequestConnectionId
    messages, sent with the new functions `SSL_dtls_new_connection_id()` and
-   `SSL_dtls_request_connection_id()`.
+   `SSL_dtls_request_connection_id()`.  An application that finds its
+   connections by the Connection ID itself can choose the Connection IDs the
+   library gives out with `SSL_CTX_set_dtls_new_cid_cb()`.
 
    *Showta Ishizaki*
 

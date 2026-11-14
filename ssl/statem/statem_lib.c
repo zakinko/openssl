@@ -768,32 +768,42 @@ static int dtls_cid_set_rl(SSL_CONNECTION *s, int read, const char *key,
  * Make one more CID of our own, of the length of the one in our extension:
  * the length is not on the wire, so all the CIDs we receive must share it
  * (RFC 9146 section 3).  A connection of a listener routing by CID has it
- * registered there too.
+ * registered there too.  The CID is the one the application's callback
+ * chooses, or random.  Returns 1 with the CID in |cid|, 0 if the callback
+ * has none to give, -1 on error and -2 if the callback chose a CID that is
+ * in use: the application answers for those, and is not asked again.
  */
 static int dtls_cid_make_own(SSL_CONNECTION *s, unsigned char *cid)
 {
     SSL *ssl = SSL_CONNECTION_GET_SSL(s);
+    SSL_CTX *ctx = SSL_CONNECTION_GET_CTX(s);
     size_t len = s->ext.dtls_cid.sent_len, i;
     int tries;
 
     for (tries = 0; tries < 8; tries++) {
         int clash = 0;
 
-        if (RAND_bytes_ex(ssl->ctx->libctx, cid, len, 0) <= 0)
-            return 0;
+        if (ctx->dtls_new_cid_cb != NULL) {
+            if (!ctx->dtls_new_cid_cb(SSL_CONNECTION_GET_USER_SSL(s), cid, len,
+                    ctx->dtls_new_cid_arg))
+                return 0;
+        } else if (RAND_bytes_ex(ctx->libctx, cid, len, 0) <= 0) {
+            return -1;
+        }
         clash = memcmp(cid, s->ext.dtls_cid.sent, len) == 0;
         for (i = 0; !clash && i < s->ext.dtls_cid.own_more_num; i++)
             clash = memcmp(cid, s->ext.dtls_cid.own_more + i * len, len) == 0;
-        if (clash)
-            continue;
 #ifndef OPENSSL_NO_SOCK
-        if (s->d1 != NULL && s->d1->listener != NULL
+        if (!clash && s->d1 != NULL && s->d1->listener != NULL
             && !ossl_dtls_listener_add_conn_cid(s->d1->listener, ssl, cid, len))
-            continue;
+            clash = 1;
 #endif
-        return 1;
+        if (!clash)
+            return 1;
+        if (ctx->dtls_new_cid_cb != NULL)
+            return -2;
     }
-    return 0;
+    return -1;
 }
 
 /*-
@@ -808,7 +818,8 @@ static int dtls_cid_make_own(SSL_CONNECTION *s, unsigned char *cid)
  * message carries fewer, as an answer to RequestConnectionId may ("An
  * endpoint MAY handle requests which it considers excessive by responding
  * with a NewConnectionId message containing fewer than num_cids CIDs,
- * including no CIDs at all").
+ * including no CIDs at all"), and so it does when the application's
+ * callback has none to give.
  */
 CON_FUNC_RETURN tls_construct_new_connection_id(SSL_CONNECTION *s,
     WPACKET *pkt)
@@ -819,9 +830,6 @@ CON_FUNC_RETURN tls_construct_new_connection_id(SSL_CONNECTION *s,
 
     room = DTLS_CID_MAX_OWN_MORE - s->ext.dtls_cid.own_more_num;
     n = s->ext.dtls_cid.ncid_num < room ? s->ext.dtls_cid.ncid_num : room;
-    /* "cid_immediate" needs a CID to use; with none left it is "cid_spare" */
-    if (n == 0)
-        usage = SSL_DTLS_CID_SPARE;
     more = OPENSSL_realloc(s->ext.dtls_cid.own_more,
         (s->ext.dtls_cid.own_more_num + n) * len + 1);
     if (more == NULL) {
@@ -836,14 +844,23 @@ CON_FUNC_RETURN tls_construct_new_connection_id(SSL_CONNECTION *s,
     }
     for (i = 0; i < n; i++) {
         unsigned char *cid = more + s->ext.dtls_cid.own_more_num * len;
+        int ret = dtls_cid_make_own(s, cid);
 
-        if (!dtls_cid_make_own(s, cid)
-            || !WPACKET_sub_memcpy_u8(pkt, cid, len)) {
+        if (ret == 0)
+            break;
+        if (ret == -2) {
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_R_DTLS_CID_CALLBACK_FAILURE);
+            return CON_FUNC_ERROR;
+        }
+        if (ret < 0 || !WPACKET_sub_memcpy_u8(pkt, cid, len)) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
             return CON_FUNC_ERROR;
         }
         s->ext.dtls_cid.own_more_num++;
     }
+    /* "cid_immediate" needs a CID to use; with none it is "cid_spare" */
+    if (i == 0)
+        usage = SSL_DTLS_CID_SPARE;
     if (!WPACKET_close(pkt)
         || !WPACKET_put_bytes_u8(pkt, usage)
         /* The read record layer has to take them before the peer uses them */

@@ -8710,6 +8710,125 @@ static int test_dtls13_listener_cid(int idx)
 
     return listener_cid(DTLS1_3_VERSION, cases[idx]);
 }
+
+static int listener_new_cid_calls;
+
+static int listener_new_cid_cb(SSL *s, unsigned char *cid, size_t cid_len,
+    void *arg)
+{
+    memset(cid, 0x4c, cid_len);
+    cid[cid_len - 1] = (unsigned char)++listener_new_cid_calls;
+    return 1;
+}
+
+/*
+ * SSL_CTX_set_dtls_new_cid_cb() on a listener: the application chooses the
+ * CID of each connection and the further CIDs it gives out, and the
+ * listener finds the connection by them.
+ */
+static int test_dtls13_listener_new_cid_cb(void)
+{
+    static const unsigned char ccid[] = { 0xc1, 0xc2 };
+    static const unsigned char want[2][LISTENER_CID_LEN] = {
+        { 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x01 },
+        { 0x4c, 0x4c, 0x4c, 0x4c, 0x4c, 0x02 },
+    };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *serverssl = NULL, *clientssl = NULL;
+    BIO_ADDR *client_addr = NULL, *moved = NULL;
+    const unsigned char *own, *peer;
+    size_t ownlen, peerlen, n;
+    struct in_addr ina;
+    char buf[64];
+    int abortctr = 0, testresult = 0, i;
+
+    listener_new_cid_calls = 0;
+    peer_change_calls = 0;
+    peer_change_answer = 1;
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    SSL_CTX_set_dtls_peer_addr_change_cb(sctx, peer_change_cb, NULL);
+    SSL_CTX_set_dtls_new_cid_cb(sctx, listener_new_cid_cb, NULL);
+
+    if (!TEST_true(create_dtls_listener_and_client_mem(sctx, cctx,
+            SSL_LISTENER_FLAG_NO_VALIDATE | SSL_LISTENER_FLAG_SINGLE_THREAD,
+            &listener, &clientssl, &client_addr))
+        || !TEST_true(SSL_set_value_uint(listener, SSL_VALUE_CLASS_GENERIC,
+            SSL_VALUE_DTLS_LISTENER_CID_LEN, LISTENER_CID_LEN))
+        || !TEST_true(SSL_set1_dtls_cid(clientssl, ccid, sizeof(ccid)))
+        || !TEST_true(SSL_set_dtls_rrc(clientssl, 0)))
+        goto end;
+
+    SSL_set_connect_state(clientssl);
+    while (serverssl == NULL) {
+        int ret;
+
+        if (!TEST_int_lt(++abortctr, 100))
+            goto end;
+        ret = SSL_connect(clientssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        serverssl = SSL_accept_connection(listener,
+            SSL_ACCEPT_CONNECTION_NO_BLOCK);
+    }
+    if (!TEST_true(create_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE))
+        /* The connection's CID is the callback's first */
+        || !TEST_int_eq(listener_new_cid_calls, 1)
+        || !TEST_int_eq(SSL_get0_dtls_cid(serverssl, &own, &ownlen, NULL, NULL), 1)
+        || !TEST_mem_eq(own, ownlen, want[0], sizeof(want[0]))
+        /* The NewSessionTicket and its ACK */
+        || !TEST_true(SSL_write_ex(clientssl, "first", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_true(SSL_write_ex(serverssl, "first", 5, &n))
+        || !TEST_true(dtls_read_with_retry(clientssl, buf, sizeof(buf), &n)))
+        goto end;
+
+    /* The server gives a new CID, the callback's second, for immediate use */
+    if (!TEST_true(SSL_dtls_new_connection_id(serverssl, SSL_DTLS_CID_IMMEDIATE)))
+        goto end;
+    for (i = 0; i < 8 && (SSL_in_init(serverssl) || SSL_in_init(clientssl)); i++) {
+        if (!TEST_false(SSL_read_ex(serverssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(serverssl, 0), SSL_ERROR_WANT_READ)
+            || !TEST_false(SSL_read_ex(clientssl, buf, sizeof(buf), &n))
+            || !TEST_int_eq(SSL_get_error(clientssl, 0), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    if (!TEST_int_lt(i, 8)
+        || !TEST_int_eq(listener_new_cid_calls, 2)
+        || !TEST_int_eq(SSL_get0_dtls_cid(clientssl, NULL, NULL, &peer, &peerlen), 1)
+        || !TEST_mem_eq(peer, peerlen, want[1], sizeof(want[1])))
+        goto end;
+
+    /* From a new address the record finds the connection by that CID */
+    ina.s_addr = htonl(INADDR_LOOPBACK);
+    if (!TEST_ptr(moved = BIO_ADDR_new())
+        || !TEST_true(BIO_ADDR_rawmake(moved, AF_INET, &ina, sizeof(ina),
+            htons(23456)))
+        || !TEST_int_eq(BIO_dgram_set0_local_addr(SSL_get_wbio(clientssl),
+                            moved),
+            1))
+        goto end;
+    moved = NULL;
+    if (!TEST_true(SSL_write_ex(clientssl, "moved", 5, &n))
+        || !TEST_true(dtls_read_with_retry(serverssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "moved", 5)
+        || !TEST_int_eq(conn_peer_port(serverssl), 23456))
+        goto end;
+
+    testresult = 1;
+end:
+    BIO_ADDR_free(moved);
+    BIO_ADDR_free(client_addr);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
 #endif
 
 /*
@@ -9053,6 +9172,7 @@ int setup_tests(void)
     ADD_TEST(test_dtls12_listener_cid_move_in_handshake);
 #ifndef OPENSSL_NO_DTLS1_3
     ADD_ALL_TESTS(test_dtls13_listener_cid, 5);
+    ADD_TEST(test_dtls13_listener_new_cid_cb);
 #endif
 #endif
 #endif

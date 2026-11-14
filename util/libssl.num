@@ -634,3 +634,4 @@ SSL_set_dtls_rrc                        ?	4_2_0	EXIST::FUNCTION:
 SSL_get_dtls_rrc                        ?	4_2_0	EXIST::FUNCTION:
 SSL_dtls_new_connection_id              ?	4_2_0	EXIST::FUNCTION:
 SSL_dtls_request_connection_id          ?	4_2_0	EXIST::FUNCTION:
+SSL_CTX_set_dtls_new_cid_cb             ?	4_2_0	EXIST::FUNCTION:

@@ -111,6 +111,7 @@ PROFESSION_INFO                         datatype
 PROFESSION_INFOS                        datatype
 RAND_poll_cb                            datatype
 SSL_CTX_allow_early_data_cb_fn          datatype
+SSL_dtls_new_cid_cb_fn                  datatype
 SSL_dtls_peer_addr_change_cb_fn         datatype
 SSL_CTX_keylog_cb_func                  datatype
 SSL_allow_early_data_cb_fn              datatype
