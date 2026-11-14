@@ -2855,6 +2855,64 @@ end:
     return testresult;
 }
 
+#ifndef OPENSSL_NO_DTLS1_3
+/*
+ * A DTLS 1.3 record carries up to 2^14 bytes, like a TLS 1.3 one: the
+ * content type that follows them in the DTLSInnerPlaintext does not count
+ * (RFC 8446 section 5.4).  idx 0: 2^14 bytes, idx 1: one less.
+ */
+static int test_dtls13_max_record(int idx)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    BIO *sbio = NULL, *cbio = NULL;
+    unsigned char *out = NULL, *in = NULL;
+    size_t n, max = SSL3_RT_MAX_PLAIN_LENGTH - idx;
+    int testresult = 0, i;
+
+    if (!TEST_ptr(out = OPENSSL_malloc(max))
+        || !TEST_ptr(in = OPENSSL_malloc(max + 1))
+        || !TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey))
+        || !TEST_int_eq(BIO_new_bio_dgram_pair(&sbio, 1024 * 1024, &cbio,
+                            1024 * 1024),
+            1)
+        || !TEST_ptr(sssl = SSL_new(sctx))
+        || !TEST_ptr(cssl = SSL_new(cctx)))
+        goto end;
+    memset(out, 'a', max);
+    SSL_set_bio(sssl, sbio, sbio);
+    SSL_set_bio(cssl, cbio, cbio);
+    sbio = cbio = NULL;
+    if (!TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+        || !TEST_true(SSL_write_ex(cssl, out, max, &n))
+        || !TEST_size_t_eq(n, max))
+        goto end;
+    /* The server may have the end of the handshake to take first */
+    for (i = 0; i < 4 && !SSL_read_ex(sssl, in, max + 1, &n); i++) {
+        if (!TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_WANT_READ)
+            || !TEST_false(SSL_read_ex(cssl, in, max + 1, &n))
+            || !TEST_int_eq(SSL_get_error(cssl, 0), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    if (!TEST_int_lt(i, 4) || !TEST_mem_eq(in, n, out, max))
+        goto end;
+
+    testresult = 1;
+end:
+    OPENSSL_free(out);
+    OPENSSL_free(in);
+    BIO_free(sbio);
+    BIO_free(cbio);
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+#endif
+
 OPT_TEST_DECLARE_USAGE("certfile privkeyfile\n")
 
 int setup_tests(void)
@@ -2903,6 +2961,7 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_dtls13_plaintext_after_hellos, 3);
     ADD_TEST(test_dtls13_ccm8_not_offered);
     ADD_TEST(test_dtls13_ack_read_timeout);
+    ADD_ALL_TESTS(test_dtls13_max_record, 2);
     ADD_ALL_TESTS(test_dtls13_early_data_retransmit, 2);
 #endif
 #ifndef OPENSSL_NO_DTLS1_2

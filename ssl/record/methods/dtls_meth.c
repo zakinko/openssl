@@ -277,9 +277,19 @@ static int dtls_process_record(OSSL_RECORD_LAYER *rl, DTLS_BITMAP *bitmap)
 
     /*
      * Check if the received packet overflows the current Max Fragment
-     * Length setting.
+     * Length setting.  A DTLS 1.3 record still holds the DTLSInnerPlaintext
+     * here: "the full encoded TLSInnerPlaintext MUST NOT exceed 2^14 + 1
+     * octets" (RFC 8446 section 5.4), and dtls_get_more_records() checks
+     * the content once post_process_record() has taken the type off.
      */
-    if (rr->length > rl->max_frag_len) {
+    if (rl->version == DTLS1_3_VERSION
+        && DTLS13_UNI_HDR_FIX_BITS_IS_SET(rr->type)) {
+        if (rr->length > SSL3_RT_MAX_PLAIN_LENGTH + 1) {
+            RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW,
+                SSL_R_DATA_LENGTH_TOO_LONG);
+            goto end;
+        }
+    } else if (rr->length > rl->max_frag_len) {
         RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
         goto end;
     }
@@ -923,6 +933,12 @@ again:
 
     if (rl->funcs->post_process_record && !rl->funcs->post_process_record(rl, rr)) {
         /* RLAYERfatal already called */
+        return OSSL_RECORD_RETURN_FATAL;
+    }
+
+    /* The Max Fragment Length check that dtls_process_record() left */
+    if (rl->version == DTLS1_3_VERSION && rr->length > rl->max_frag_len) {
+        RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
         return OSSL_RECORD_RETURN_FATAL;
     }
 
