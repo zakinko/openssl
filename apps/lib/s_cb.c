@@ -627,6 +627,8 @@ static STRINT_PAIR handshakes[] = {
     { ", NewSessionTicket", SSL3_MT_NEWSESSION_TICKET },
     { ", EndOfEarlyData", SSL3_MT_END_OF_EARLY_DATA },
     { ", EncryptedExtensions", SSL3_MT_ENCRYPTED_EXTENSIONS },
+    { ", RequestConnectionId", SSL3_MT_REQUEST_CONNECTION_ID },
+    { ", NewConnectionId", SSL3_MT_NEW_CONNECTION_ID },
     { ", Certificate", SSL3_MT_CERTIFICATE },
     { ", ServerKeyExchange", SSL3_MT_SERVER_KEY_EXCHANGE },
     { ", CertificateRequest", SSL3_MT_CERTIFICATE_REQUEST },
@@ -1405,6 +1407,51 @@ void print_ssl_summary(SSL *s)
         ssl_print_groups(bio_err, s, 1);
 #endif
     ssl_print_tmp_key(bio_err, s);
+    print_dtls_cid(bio_err, s);
+}
+
+/*
+ * Enable the DTLS Connection ID on |s| and ask for the CID given in hex;
+ * an empty string asks for an empty CID.
+ */
+int set_dtls_cid_hex(SSL *s, const char *hex)
+{
+    unsigned char *cid = NULL;
+    long len = 0;
+    int ret;
+
+    if (*hex != '\0' && (cid = OPENSSL_hexstr2buf(hex, &len)) == NULL)
+        return 0;
+    ret = SSL_set1_dtls_cid(s, cid, (size_t)len);
+    OPENSSL_free(cid);
+    return ret;
+}
+
+static void print_one_dtls_cid(BIO *out, const char *what,
+    const unsigned char *cid, size_t len)
+{
+    size_t i;
+
+    BIO_printf(out, "DTLS Connection ID %s: ", what);
+    if (len == 0)
+        BIO_puts(out, "(empty)");
+    for (i = 0; i < len; i++)
+        BIO_printf(out, "%02X", cid[i]);
+    BIO_puts(out, "\n");
+}
+
+/* Say what Connection IDs a DTLS connection negotiated, if any */
+void print_dtls_cid(BIO *out, SSL *s)
+{
+    const unsigned char *own, *peer;
+    size_t ownlen, peerlen;
+
+    if (!SSL_is_dtls(s) || !SSL_get0_dtls_cid(s, &own, &ownlen, &peer, &peerlen))
+        return;
+    print_one_dtls_cid(out, "received", own, ownlen);
+    print_one_dtls_cid(out, "sent", peer, peerlen);
+    BIO_printf(out, "DTLS Return Routability Check: %s\n",
+        SSL_get_dtls_rrc(s) ? "negotiated" : "not negotiated");
 }
 
 int config_ctx(SSL_CONF_CTX *cctx, STACK_OF(OPENSSL_STRING) *str,

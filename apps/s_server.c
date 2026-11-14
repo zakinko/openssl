@@ -147,6 +147,25 @@ static int enable_client_rpk = 0;
 #ifndef OPENSSL_NO_DTLS
 static int enable_timeouts = 0;
 static long socket_mtu;
+static const char *dtls_cid = NULL;
+static unsigned char *dtls_cid_prefix = NULL;
+static long dtls_cid_prefix_len = 0;
+static int no_dtls_rrc = 0;
+
+#ifndef OPENSSL_NO_DTLS
+/* The further Connection IDs: the prefix, and random bytes after it */
+static int new_dtls_cid_cb(SSL *s, unsigned char *cid, size_t cid_len,
+    void *arg)
+{
+    size_t prefix_len = (size_t)dtls_cid_prefix_len;
+
+    /* Without random bytes every Connection ID would be the same */
+    if (prefix_len >= cid_len)
+        return 0;
+    memcpy(cid, dtls_cid_prefix, prefix_len);
+    return RAND_bytes(cid + prefix_len, (int)(cid_len - prefix_len)) > 0;
+}
+#endif
 #endif
 
 /*
@@ -1269,6 +1288,9 @@ typedef enum OPTION_choice {
     OPT_SCTP,
     OPT_TIMEOUT,
     OPT_MTU,
+    OPT_DTLS_CID,
+    OPT_DTLS_CID_PREFIX,
+    OPT_NO_DTLS_RRC,
     OPT_LISTEN,
     OPT_STATELESS,
     OPT_ID_PREFIX,
@@ -1484,6 +1506,12 @@ const OPTIONS s_server_options[] = {
     { "nbio", OPT_NBIO, '-', "Use non-blocking IO" },
     { "timeout", OPT_TIMEOUT, '-', "Enable timeouts" },
     { "mtu", OPT_MTU, 'p', "Set link-layer MTU" },
+    { "dtls_cid", OPT_DTLS_CID, 's',
+        "Accept the DTLS Connection ID extension with this CID, in hex (may be empty)" },
+    { "dtls_cid_prefix", OPT_DTLS_CID_PREFIX, 's',
+        "Start further DTLS Connection IDs with these bytes, in hex" },
+    { "no_dtls_rrc", OPT_NO_DTLS_RRC, '-',
+        "Do not accept the DTLS Return Routability Check" },
     { "read_buf", OPT_READ_BUF, 'p',
         "Default read buffer size to be used for connections" },
     { "split_send_frag", OPT_SPLIT_SEND_FRAG, 'p',
@@ -2277,6 +2305,27 @@ int s_server_main(int argc, char *argv[])
                 goto opthelp;
 #endif
             break;
+        case OPT_DTLS_CID:
+#ifndef OPENSSL_NO_DTLS
+            dtls_cid = opt_arg();
+#endif
+            break;
+        case OPT_DTLS_CID_PREFIX:
+#ifndef OPENSSL_NO_DTLS
+            OPENSSL_free(dtls_cid_prefix);
+            dtls_cid_prefix = OPENSSL_hexstr2buf(opt_arg(), &dtls_cid_prefix_len);
+            if (dtls_cid_prefix == NULL) {
+                BIO_printf(bio_err, "Invalid DTLS Connection ID prefix: %s\n",
+                    opt_arg());
+                goto end;
+            }
+#endif
+            break;
+        case OPT_NO_DTLS_RRC:
+#ifndef OPENSSL_NO_DTLS
+            no_dtls_rrc = 1;
+#endif
+            break;
         case OPT_LISTEN:
 #ifndef OPENSSL_NO_DTLS
             dtlslisten = 1;
@@ -3040,6 +3089,11 @@ int s_server_main(int argc, char *argv[])
     if (psk_key != NULL || psksess != NULL)
         SSL_CTX_set_psk_find_session_callback(ctx, psk_find_session_cb);
 
+#ifndef OPENSSL_NO_DTLS
+    if (dtls_cid_prefix != NULL)
+        SSL_CTX_set_dtls_new_cid_cb(ctx, new_dtls_cid_cb, NULL);
+#endif
+
     SSL_CTX_set_verify(ctx, s_server_verify, verify_callback);
     if (!SSL_CTX_set_session_id_context(ctx,
             (void *)&s_server_session_id_context,
@@ -3194,6 +3248,8 @@ end:
     OPENSSL_free(alpn_ctx.data);
     ssl_excert_free(exc);
     sk_OPENSSL_STRING_free(ssl_args);
+    OPENSSL_free(dtls_cid_prefix);
+    dtls_cid_prefix = NULL;
     sk_OPENSSL_STRING_free(rpk_files);
     SSL_CONF_CTX_free(cctx);
     BIO_free(bio_s_out);
@@ -3374,6 +3430,15 @@ static int sv_body(int s, int stype, int prot, unsigned char *context)
         } else
             /* want to do MTU discovery */
             BIO_ctrl(sbio, BIO_CTRL_DGRAM_MTU_DISCOVER, 0, NULL);
+
+        if (dtls_cid != NULL && !set_dtls_cid_hex(con, dtls_cid)) {
+            BIO_printf(bio_err, "Invalid DTLS Connection ID: %s\n", dtls_cid);
+            ret = -1;
+            BIO_free(sbio);
+            goto err;
+        }
+        if (no_dtls_rrc)
+            SSL_set_dtls_rrc(con, 0);
 
 #ifndef OPENSSL_NO_SCTP
         if (prot != IPPROTO_SCTP)
@@ -3897,6 +3962,8 @@ static void print_connection_info(SSL *con)
 
     if (s_brief)
         print_ssl_summary(con);
+    else
+        print_dtls_cid(bio_s_out, con);
 
     PEM_write_bio_SSL_SESSION(bio_s_out, SSL_get_session(con));
 
