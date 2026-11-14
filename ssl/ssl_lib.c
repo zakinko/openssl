@@ -4421,6 +4421,21 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
         *protos_len = len;
 }
 
+int ossl_dtls_cid_set_own(SSL_CONNECTION *sc, const unsigned char *cid,
+    size_t cid_len)
+{
+    unsigned char *own = NULL;
+
+    if (cid_len != 0 && (own = OPENSSL_memdup(cid, cid_len)) == NULL)
+        return 0;
+
+    OPENSSL_free(sc->ext.dtls_cid.own);
+    sc->ext.dtls_cid.own = own;
+    sc->ext.dtls_cid.own_len = cid_len;
+    sc->ext.dtls_cid.enabled = 1;
+    return 1;
+}
+
 /*
  * SSL_set1_dtls_cid enables the DTLS 1.2 "connection_id" extension (RFC 9146)
  * on |s| and sets the CID we want the peer to use when sending to us.  A
@@ -4430,7 +4445,6 @@ void SSL_get0_alpn_protos(SSL *ssl, const unsigned char **protos,
 int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len)
 {
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL(s);
-    unsigned char *own = NULL;
 
     if (sc == NULL || !SSL_CONNECTION_IS_DTLS(sc)) {
         ERR_raise(ERR_LIB_SSL, ERR_R_PASSED_INVALID_ARGUMENT);
@@ -4461,14 +4475,7 @@ int SSL_set1_dtls_cid(SSL *s, const unsigned char *cid, size_t cid_len)
     }
 #endif
 
-    if (cid_len != 0 && (own = OPENSSL_memdup(cid, cid_len)) == NULL)
-        return 0;
-
-    OPENSSL_free(sc->ext.dtls_cid.own);
-    sc->ext.dtls_cid.own = own;
-    sc->ext.dtls_cid.own_len = cid_len;
-    sc->ext.dtls_cid.enabled = 1;
-    return 1;
+    return ossl_dtls_cid_set_own(sc, cid, cid_len);
 }
 
 /*
@@ -7842,6 +7849,13 @@ void SSL_CTX_set_dtls_peer_addr_change_cb(SSL_CTX *c,
 {
     c->dtls_peer_addr_change_cb = cb;
     c->dtls_peer_addr_change_arg = arg;
+}
+
+void SSL_CTX_set_dtls_new_cid_cb(SSL_CTX *c, SSL_dtls_new_cid_cb_fn cb,
+    void *arg)
+{
+    c->dtls_new_cid_cb = cb;
+    c->dtls_new_cid_arg = arg;
 }
 
 #ifndef OPENSSL_NO_DEPRECATED_4_0

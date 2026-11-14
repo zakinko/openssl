@@ -1076,6 +1076,10 @@ struct ssl_ctx_st {
     SSL_dtls_peer_addr_change_cb_fn dtls_peer_addr_change_cb;
     void *dtls_peer_addr_change_arg;
 
+    /* Callback choosing the DTLS Connection IDs we give out, else random */
+    SSL_dtls_new_cid_cb_fn dtls_new_cid_cb;
+    void *dtls_new_cid_arg;
+
     /* TLS extensions. */
     struct {
         /* TLS extensions servername callback */
@@ -2323,6 +2327,16 @@ int dtls_has_unacked_key_update(SSL_CONNECTION *s);
  * @returns 1 if one has not been acknowledged, 0 otherwise
  */
 int dtls_has_unacked_message(SSL_CONNECTION *s, int msg_type);
+
+/**
+ * @brief Set the CID to ask for in our "connection_id" extension.
+ * @param sc the connection
+ * @param cid the CID
+ * @param cid_len its length
+ * @returns 1 on success, 0 on allocation failure
+ */
+int ossl_dtls_cid_set_own(SSL_CONNECTION *sc, const unsigned char *cid,
+    size_t cid_len);
 
 /**
  * @brief Install a deferred KeyUpdate write key once it is safe to do so.
