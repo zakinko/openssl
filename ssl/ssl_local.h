@@ -1076,6 +1076,10 @@ struct ssl_ctx_st {
     SSL_dtls_peer_addr_change_cb_fn dtls_peer_addr_change_cb;
     void *dtls_peer_addr_change_arg;
 
+    /* Callback choosing the DTLS Connection IDs we give out, else random */
+    SSL_dtls_new_cid_cb_fn dtls_new_cid_cb;
+    void *dtls_new_cid_arg;
+
     /* TLS extensions. */
     struct {
         /* TLS extensions servername callback */
@@ -2315,6 +2319,8 @@ int dtls_any_sent_messages_are_missing_acknowledge(SSL_CONNECTION *s);
  *          record numbers, 0 otherwise.
  */
 int dtls_has_unacked_message(SSL_CONNECTION *s, int msg_type);
+int ossl_dtls_cid_set_own(SSL_CONNECTION *sc, const unsigned char *cid,
+    size_t cid_len);
 int dtls_has_unacked_key_update(SSL_CONNECTION *s);
 
 /**
