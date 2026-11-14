@@ -60,6 +60,8 @@ B<openssl> B<s_client>
 [B<-msg>]
 [B<-timeout>]
 [B<-mtu> I<size>]
+[B<-dtls_cid> I<hex>]
+[B<-no_dtls_rrc>]
 [B<-no_ems>]
 [B<-keymatexport> I<label>]
 [B<-keymatexportlen> I<len>]
@@ -512,6 +514,20 @@ Enable send/receive timeout on DTLS connections.
 =item B<-mtu> I<size>
 
 Set MTU of the link layer to the specified size.
+
+=item B<-dtls_cid> I<hex>
+
+Offer the DTLS Connection ID extension (RFC 9146, and RFC 9147 for DTLSv1.3),
+asking the server to send its records with the Connection ID I<hex>, given as
+a string of hexadecimal digits. An empty string asks for an empty Connection
+ID: the client then sends with the server's Connection ID but receives records
+without one. The Connection IDs that were negotiated are printed with the
+connection information. See L<SSL_set1_dtls_cid(3)>.
+
+=item B<-no_dtls_rrc>
+
+Do not offer the DTLS Return Routability Check (RFC 9853), which is otherwise
+offered together with the Connection ID.
 
 =item B<-no_ems>
 
@@ -1014,6 +1030,20 @@ argument. If the argument "req" is supplied then the peer is also requested to
 update its keys. Otherwise if "noreq" is supplied the peer is not requested
 to update its keys. The default is "req".
 
+=item B<newcid>
+
+Send a NewConnectionId message with one new Connection ID. DTLSv1.3 only, on
+a connection that negotiated Connection IDs. This command takes an optional
+argument. If the argument "immediate" is supplied then the peer must use the
+new Connection ID from then on. Otherwise if "spare" is supplied the peer may
+use it. The default is "spare".
+
+=item B<reqcid>
+
+Send a RequestConnectionId message. DTLSv1.3 only, on a connection that
+negotiated Connection IDs. This command takes an optional argument, the number
+of Connection IDs to ask the peer for, from 1 to 255. The default is 1.
+
 =item B<reneg>
 
 Initiate a renegotiation with the server. (D)TLSv1.2 or below only.
@@ -1162,6 +1192,9 @@ options were added in OpenSSL 3.6.
 The B<ech> options were added in OpenSSL 4.0.
 
 The B<-expected-rpks> option was added in OpenSSL 4.0.
+
+The B<-dtls_cid> and B<-no_dtls_rrc> options and the B<newcid> and B<reqcid>
+commands were added in OpenSSL 4.2.
 
 =head1 COPYRIGHT
 
