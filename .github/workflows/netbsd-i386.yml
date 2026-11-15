@@ -1,7 +1,7 @@
 name: netbsd-i386
 on:
   push:
-    branches: [netbsd-fixes-2-ci]
+    branches: [pr-chomp-ci]
 concurrency:
   group: netbsd-i386-${{ github.ref }}
   cancel-in-progress: true
