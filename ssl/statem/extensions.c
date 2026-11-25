@@ -1716,9 +1716,10 @@ int tls_dtls_cid_construct(SSL_CONNECTION *s, WPACKET *pkt)
     }
 
     /*
-     * The current read record layer predates the CID.  In DTLS 1.3 it reads
-     * ahead the records of the next epoch, which carry this CID if the peer
-     * accepts it (RFC 9147 section 9.1), and has to find where they end.
+     * The current read record layer predates the CID.  It reads ahead the
+     * records of the next epoch, which carry this CID if the peer accepts
+     * it (RFC 9146 section 3, RFC 9147 section 9.1), and has to find where
+     * they end.
      */
     if (s->ext.dtls_cid.sent_len != 0 && s->rlayer.rrlmethod != NULL
         && s->rlayer.rrlmethod->set_options != NULL

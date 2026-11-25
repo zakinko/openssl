@@ -742,8 +742,12 @@ end:
  * Test 3: Test receiving an app data before Finished on client side
  */
 #ifndef OPENSSL_NO_DTLS1_2
-static int test_swap_records_dtls1(int idx)
+static int swap_records_dtls1(int idx, int with_cid)
 {
+#ifndef OPENSSL_NO_DTLS1_2
+    static const unsigned char ccid[] = { 0xe1, 0xe2, 0xe3 };
+    static const unsigned char scid[] = { 0x71, 0x72, 0x73, 0x74, 0x75 };
+#endif
     SSL_CTX *sctx = NULL, *cctx = NULL;
     SSL *sssl = NULL, *cssl = NULL;
     int testresult = 0;
@@ -771,6 +775,18 @@ static int test_swap_records_dtls1(int idx)
     if (!TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl,
             NULL, NULL)))
         goto end;
+
+#ifndef OPENSSL_NO_DTLS1_2
+    if (with_cid) {
+        if (!TEST_true(SSL_set1_dtls_cid(cssl, ccid, sizeof(ccid)))
+            || !TEST_true(SSL_set1_dtls_cid(sssl, scid, sizeof(scid))))
+            goto end;
+        BIO_ctrl(SSL_get_wbio(cssl), MEMPACKET_CTRL_SET_CID_LEN,
+            sizeof(scid), NULL);
+        BIO_ctrl(SSL_get_wbio(sssl), MEMPACKET_CTRL_SET_CID_LEN,
+            sizeof(ccid), NULL);
+    }
+#endif
 
     /*
      * The MTU Size was changed to be something more reasonable
@@ -853,6 +869,9 @@ static int test_swap_records_dtls1(int idx)
     if (!TEST_int_eq(SSL_read(cssl, buf, sizeof(buf)), (int)sizeof(msg)))
         goto end;
 
+    if (!TEST_int_eq(SSL_get0_dtls_cid(cssl, NULL, NULL, NULL, NULL), with_cid))
+        goto end;
+
     testresult = 1;
 end:
     SSL_free(cssl);
@@ -861,6 +880,17 @@ end:
     SSL_CTX_free(sctx);
 
     return testresult;
+}
+
+static int test_swap_records_dtls1(int idx)
+{
+    return swap_records_dtls1(idx, 0);
+}
+
+/* The same with CIDs: what comes before the ChangeCipherSpec has one */
+static int test_swap_records_dtls1_cid(int idx)
+{
+    return swap_records_dtls1(idx, 1);
 }
 #endif /* OPENSSL_NO_DTLS1_2 */
 
@@ -3932,6 +3962,138 @@ end:
 }
 
 #ifndef OPENSSL_NO_DTLS1_2
+/*
+ * Records of the next epoch that come before the ChangeCipherSpec are kept
+ * before their MAC can be checked, so no more of them are kept with CIDs than
+ * without (RFC 6347 section 4.1, "MAY either buffer or discard such
+ * packets"), and a wrong one does not harm the handshake.  The client gets 20
+ * forged ones:
+ *   0: without CIDs
+ *   1: with the client's CID
+ *   2: with another CID, which is not kept at all
+ *   3: a renegotiation, where the new CID is of another length
+ */
+static int test_dtls_cid_next_epoch(int idx)
+{
+    static const unsigned char newcid[] = { 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6 };
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    SSL_CONNECTION *csc;
+    unsigned char rec[DTLS1_RT_HEADER_LENGTH + sizeof(newcid) + 64], *q;
+    const unsigned char *cid = cid_client;
+    size_t cidlen = sizeof(cid_client), n, held;
+    char buf[64];
+    int i, j, ret, testresult = 0;
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(), DTLS1_2_VERSION, DTLS1_2_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        goto end;
+    SSL_CTX_set_options(sctx, SSL_OP_ALLOW_CLIENT_RENEGOTIATION);
+    if (!TEST_true(cid_dgram_pair_objects(sctx, cctx, &sssl, &cssl))
+        || !TEST_ptr(csc = SSL_CONNECTION_FROM_SSL_ONLY(cssl))
+        || (idx != 0
+            && (!TEST_true(SSL_set1_dtls_cid(cssl, cid_client,
+                    sizeof(cid_client)))
+                || !TEST_true(SSL_set1_dtls_cid(sssl, cid_server,
+                    sizeof(cid_server))))))
+        goto end;
+    if (idx == 3) {
+        cid = newcid;
+        cidlen = sizeof(newcid);
+        if (!TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE))
+            || !TEST_true(SSL_set1_dtls_cid(cssl, newcid, sizeof(newcid)))
+            || !TEST_true(SSL_renegotiate(cssl)))
+            goto end;
+    } else {
+        SSL_set_connect_state(cssl);
+        SSL_set_accept_state(sssl);
+    }
+
+    /* Run the handshake until the client has sent its Finished */
+    for (i = 0; i < 10 && SSL_get_state(cssl) != TLS_ST_CW_FINISHED; i++) {
+        ret = SSL_do_handshake(cssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        if (SSL_get_state(cssl) == TLS_ST_CW_FINISHED)
+            break;
+        if (idx == 3)
+            ret = SSL_read_ex(sssl, buf, sizeof(buf), &n);
+        else
+            ret = SSL_do_handshake(sssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(sssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    if (!TEST_int_lt(i, 10))
+        goto end;
+
+    for (i = 0; i < 20; i++) {
+        q = rec;
+        *q++ = idx == 0 ? SSL3_RT_APPLICATION_DATA : SSL3_RT_TLS12_CID;
+        *q++ = DTLS1_2_VERSION >> 8;
+        *q++ = DTLS1_2_VERSION & 0xff;
+        memset(q, 0, 8);
+        q[1] = idx == 3 ? 2 : 1;
+        q[7] = (unsigned char)(i + 1);
+        q += 8;
+        if (idx != 0) {
+            memcpy(q, cid, cidlen);
+            if (idx == 2)
+                q[0] ^= 1;
+            q += cidlen;
+        }
+        *q++ = 0;
+        *q++ = 48;
+        memset(q, 0xa5, 48);
+        q += 48;
+        if (!TEST_int_eq(BIO_write(SSL_get_wbio(sssl), rec, (int)(q - rec)),
+                (int)(q - rec)))
+            goto end;
+        ret = SSL_do_handshake(cssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    held = csc->rlayer.rrlmethod->unprocessed_records(csc->rlayer.rrl);
+    if (idx == 2 ? !TEST_size_t_eq(held, 0)
+                 : (!TEST_size_t_ge(held, 1) || !TEST_size_t_le(held, 16)))
+        goto end;
+    /* As many as without CIDs, where this is what is kept */
+    if (idx != 2 && !TEST_size_t_eq(held, 1))
+        goto end;
+
+    /* The genuine flight still completes the handshake */
+    for (j = 0; j < 10 && (SSL_in_init(cssl) || SSL_in_init(sssl)); j++) {
+        if (idx == 3)
+            ret = SSL_read_ex(sssl, buf, sizeof(buf), &n);
+        else
+            ret = SSL_do_handshake(sssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(sssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+        ret = SSL_do_handshake(cssl);
+        if (ret <= 0
+            && !TEST_int_eq(SSL_get_error(cssl, ret), SSL_ERROR_WANT_READ))
+            goto end;
+    }
+    if (!TEST_int_lt(j, 10)
+        || !TEST_int_eq(SSL_get0_dtls_cid(cssl, NULL, NULL, NULL, NULL), idx != 0)
+        || !TEST_true(SSL_write_ex(sssl, "after", 5, &n))
+        || !TEST_true(SSL_read_ex(cssl, buf, sizeof(buf), &n))
+        || !TEST_mem_eq(buf, n, "after", 5))
+        goto end;
+
+    testresult = 1;
+end:
+    SSL_free(sssl);
+    SSL_free(cssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    return testresult;
+}
+
 static unsigned char big_drop[65536];
 
 static int verify_accept_cb(int ok, X509_STORE_CTX *ctx)
@@ -5100,6 +5262,7 @@ int setup_tests(void)
     ADD_TEST(test_just_finished);
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_ALL_TESTS(test_swap_records_dtls1, 4);
+    ADD_ALL_TESTS(test_swap_records_dtls1_cid, 4);
 #endif
 #if !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECX) && !defined(OPENSSL_NO_ML_KEM) \
     && !defined(OPENSSL_NO_DTLS1_3)
@@ -5144,6 +5307,7 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_dtls_cid_afresh, 4);
     ADD_ALL_TESTS(test_dtls_rrc_without_cid, 2);
     ADD_ALL_TESTS(test_dtls_cid_reneg_dropped, 2);
+    ADD_ALL_TESTS(test_dtls_cid_next_epoch, 4);
 #endif
 #if !defined(OPENSSL_NO_DTLS1_2) || !defined(OPENSSL_NO_DTLS1_3)
     ADD_TEST(test_dtls_cid_api);
