@@ -3005,6 +3005,77 @@ end:
     SSL_CTX_free(sctx);
     return testresult;
 }
+
+/*
+ * Test that a DTLS 1.3 record can carry as much data as the Max Fragment Length
+ * allows, but no more than that.
+ * Test 0: 2^14 bytes
+ * Test 1: 512 bytes, with a Max Fragment Length of 512
+ * Test 2: 513 bytes, with a Max Fragment Length of 512
+ */
+static int test_dtls13_max_record(int idx)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *sssl = NULL, *cssl = NULL;
+    SSL_CONNECTION *clientsc;
+    static unsigned char msg[SSL3_RT_MAX_PLAIN_LENGTH];
+    static unsigned char buf[SSL3_RT_MAX_PLAIN_LENGTH];
+    size_t msglen = sizeof(msg);
+    size_t len;
+    int testresult = 0;
+
+    memset(msg, 'a', sizeof(msg));
+
+    if (!TEST_true(create_ssl_ctx_pair(NULL, DTLS_server_method(),
+            DTLS_client_method(),
+            DTLS1_3_VERSION, DTLS1_3_VERSION,
+            &sctx, &cctx, cert, privkey)))
+        return 0;
+
+    if (idx > 0) {
+        msglen = 511 + idx;
+        if (!TEST_true(SSL_CTX_set_tlsext_max_fragment_length(cctx,
+                TLSEXT_max_fragment_length_512)))
+            goto end;
+    }
+
+    if (!TEST_true(create_ssl_objects(sctx, cctx, &sssl, &cssl, NULL, NULL))
+        || !TEST_true(create_ssl_connection(sssl, cssl, SSL_ERROR_NONE)))
+        goto end;
+
+    if (idx == 2) {
+        /* Make the client forget about the Max Fragment Length */
+        if (!TEST_ptr(clientsc = SSL_CONNECTION_FROM_SSL_ONLY(cssl)))
+            goto end;
+        clientsc->session->ext.max_fragment_len_mode
+            = TLSEXT_max_fragment_length_DISABLED;
+    }
+
+    if (!TEST_true(SSL_write_ex(cssl, msg, msglen, &len))
+        || !TEST_size_t_eq(len, msglen))
+        goto end;
+
+    if (idx == 2) {
+        if (!TEST_false(SSL_read_ex(sssl, buf, sizeof(buf), &len))
+            || !TEST_int_eq(SSL_get_error(sssl, 0), SSL_ERROR_SSL)
+            || !TEST_int_eq(ERR_GET_REASON(ERR_peek_error()),
+                SSL_R_DATA_LENGTH_TOO_LONG))
+            goto end;
+        ERR_clear_error();
+    } else if (!TEST_true(SSL_read_ex(sssl, buf, sizeof(buf), &len))
+        || !TEST_mem_eq(buf, len, msg, msglen)) {
+        goto end;
+    }
+
+    testresult = 1;
+end:
+    SSL_free(cssl);
+    SSL_free(sssl);
+    SSL_CTX_free(cctx);
+    SSL_CTX_free(sctx);
+
+    return testresult;
+}
 #endif /* OPENSSL_NO_DTLS1_3 */
 
 /*
@@ -3122,6 +3193,7 @@ int setup_tests(void)
     ADD_TEST(test_dtls13_ccm8_not_offered);
     ADD_TEST(test_dtls13_ack_read_timeout);
     ADD_ALL_TESTS(test_dtls13_early_data_retransmit, 2);
+    ADD_ALL_TESTS(test_dtls13_max_record, 3);
 #endif
 #ifndef OPENSSL_NO_DTLS1_2
     ADD_TEST(test_dtls_client_retransmit);

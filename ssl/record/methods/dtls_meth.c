@@ -139,6 +139,7 @@ static int dtls_process_record(OSSL_RECORD_LAYER *rl, DTLS_BITMAP *bitmap)
     int imac_size;
     size_t mac_size = 0;
     size_t rechdrsize = dtls_get_rec_header_size(rl->packet[0]);
+    size_t max_len = rl->max_frag_len;
     unsigned char md[EVP_MAX_MD_SIZE];
     unsigned char *macbuf = NULL;
     int ret = 0;
@@ -277,9 +278,14 @@ static int dtls_process_record(OSSL_RECORD_LAYER *rl, DTLS_BITMAP *bitmap)
 
     /*
      * Check if the received packet overflows the current Max Fragment
-     * Length setting.
+     * Length setting. A DTLS 1.3 record still has its content type here, which
+     * post_process_record() removes later: "the full encoded TLSInnerPlaintext
+     * MUST NOT exceed 2^14 + 1 octets" (RFC 8446 section 5.4).
      */
-    if (rr->length > rl->max_frag_len) {
+    if (rl->version == DTLS1_3_VERSION
+        && DTLS13_UNI_HDR_FIX_BITS_IS_SET(rr->type))
+        max_len++;
+    if (rr->length > max_len) {
         RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
         goto end;
     }
