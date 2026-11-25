@@ -541,6 +541,21 @@ static void dtls_discard_datagram(OSSL_RECORD_LAYER *rl)
     rl->packet_length = 0;
 }
 
+/*
+ * Is the CID of a DTLS 1.2 record of |epoch| that of the handshake in
+ * progress, |frame_cid|, and not the one of the keys this record layer holds?
+ */
+static int dtls12_is_frame_cid(const OSSL_RECORD_LAYER *rl, uint64_t epoch)
+{
+    return rl->frame_cid_len != 0 && epoch == rl->epoch + 1;
+}
+
+/* The length of the CID in a DTLS 1.2 record of |epoch|, 0 if there is none */
+static size_t dtls12_cid_len(const OSSL_RECORD_LAYER *rl, uint64_t epoch)
+{
+    return dtls12_is_frame_cid(rl, epoch) ? rl->frame_cid_len : rl->cid_len;
+}
+
 /*-
  * Call this to get a new input record.
  * It will return <= 0 if more data is needed, normally due to an error
@@ -835,20 +850,24 @@ again:
              *         opaque enc_content[DTLSCiphertext.length];
              *     } DTLSCiphertext;
              * cid_length is not on the wire: it is the length of the CID we
-             * asked for (section 3).  Without one, as in a record layer
-             * that predates the handshake, the length field cannot be found.
+             * asked for (section 3).  The epoch tells which handshake's: a
+             * record of the next epoch is framed with the CID we sent in
+             * the handshake in progress (frame_cid), and kept for the next
+             * record layer below.  Without a CID the length field cannot be
+             * found.
              */
             PACKET cid;
-            size_t cidread = 0;
+            size_t cidread = 0, cidlen;
 
-            if (rl->cid_len == 0) {
+            if (!PACKET_get_net_2(&dtlsrecord, &record_version)
+                || !PACKET_get_net_2(&dtlsrecord, &epoch)
+                || (cidlen = dtls12_cid_len(rl, epoch)) == 0) {
                 dtls_discard_datagram(rl);
                 rr->length = 0;
                 goto again;
             }
-            rret = rl->funcs->read_n(rl, rl->cid_len, rl->cid_len, 1, 0,
-                &cidread);
-            if (rret < OSSL_RECORD_RETURN_SUCCESS || cidread != rl->cid_len) {
+            rret = rl->funcs->read_n(rl, cidlen, cidlen, 1, 0, &cidread);
+            if (rret < OSSL_RECORD_RETURN_SUCCESS || cidread != cidlen) {
                 if (rl->alert != SSL_AD_NO_ALERT) {
                     /* read_n() called RLAYERfatal() */
                     return OSSL_RECORD_RETURN_FATAL;
@@ -864,7 +883,7 @@ again:
                 || !PACKET_get_net_2(&dtlsrecord, &record_version)
                 || !PACKET_get_net_2(&dtlsrecord, &epoch)
                 || !PACKET_copy_bytes(&dtlsrecord, recseqnum, 6)
-                || !PACKET_get_sub_packet(&dtlsrecord, &cid, rl->cid_len)
+                || !PACKET_get_sub_packet(&dtlsrecord, &cid, cidlen)
                 || !PACKET_get_net_2(&dtlsrecord, &length)) {
                 dtls_discard_datagram(rl);
                 rr->length = 0;
@@ -878,7 +897,9 @@ again:
              * invalid here (RFC 6347 section 4.1.2.7).  The CID is not
              * secret, so the comparison need not be constant time.
              */
-            if (dtls_cid_is_ours(rl, PACKET_data(&cid)) == NULL) {
+            if (dtls12_is_frame_cid(rl, epoch)
+                    ? memcmp(PACKET_data(&cid), rl->frame_cid, cidlen) != 0
+                    : dtls_cid_is_ours(rl, PACKET_data(&cid)) == NULL) {
                 dtls_discard_datagram(rl);
                 rr->length = 0;
                 goto again;
@@ -980,11 +1001,11 @@ again:
      * real end of the header, which rl->packet[0] gives again on re-entry.
      */
     bodyoff = DTLS1_RT_HEADER_LENGTH;
-    if ((rl->version != DTLS1_3_VERSION && rl->cid_len != 0
-            && rl->packet[0] == SSL3_RT_TLS12_CID)
-        || ((rl->cid_len != 0 || rl->frame_cid_len != 0)
-            && DTLS13_UNI_HDR_FIX_BITS_IS_SET(rl->packet[0])
-            && DTLS13_UNI_HDR_CID_BIT_IS_SET(rl->packet[0])))
+    if (rl->version != DTLS1_3_VERSION && rl->packet[0] == SSL3_RT_TLS12_CID)
+        bodyoff += dtls12_cid_len(rl, rr->epoch);
+    else if ((rl->cid_len != 0 || rl->frame_cid_len != 0)
+        && DTLS13_UNI_HDR_FIX_BITS_IS_SET(rl->packet[0])
+        && DTLS13_UNI_HDR_CID_BIT_IS_SET(rl->packet[0]))
         bodyoff = dtls_get_rec_header_size(rl, rl->packet[0]);
     if (rr->length > rl->packet_length - bodyoff) {
         /* now rl->packet_length == DTLS1_RT_HEADER_LENGTH */

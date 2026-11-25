@@ -500,6 +500,8 @@ int mempacket_swap_epoch(BIO *bio)
 
         if (DTLS13_UNI_HDR_FIX_BITS_IS_SET(*rec))
             rechdrlen = DTLS13_UNI_HDR_FIXED_LENGTH;
+        else if (*rec == SSL3_RT_TLS12_CID)
+            rechdrlen = DTLS1_RT_HEADER_LENGTH + (int)ctx->cidlen;
         else
             rechdrlen = DTLS1_RT_HEADER_LENGTH;
 
@@ -516,7 +518,7 @@ int mempacket_swap_epoch(BIO *bio)
             len += rechdrlen;
         } else {
             epoch = (rec[RECORD_EPOCH_HI] << 8) | rec[RECORD_EPOCH_LO];
-            len = ((rec[RECORD_LEN_HI] << 8) | rec[RECORD_LEN_LO]) + rechdrlen;
+            len = ((rec[rechdrlen - 2] << 8) | rec[rechdrlen - 1]) + rechdrlen;
         }
         if (rem < len)
             return 0;
