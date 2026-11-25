@@ -243,7 +243,7 @@ int tls_setup_read_buffer(OSSL_RECORD_LAYER *rl)
     headerlen = tls_get_record_header_len(rl);
     /* The CID we are sent is part of the record header, see above */
     if (rl->isdtls)
-        headerlen += rl->cid_len != 0 ? rl->cid_len : rl->frame_cid_len;
+        headerlen += rl->cid_len > rl->frame_cid_len ? rl->cid_len : rl->frame_cid_len;
 
 #if defined(SSL3_ALIGN_PAYLOAD) && SSL3_ALIGN_PAYLOAD != 0
     maxalign = SSL3_ALIGN_PAYLOAD - 1;
@@ -1209,9 +1209,14 @@ int tls_set_options(OSSL_RECORD_LAYER *rl, const OSSL_PARAM *options)
             ERR_raise(ERR_LIB_SSL, SSL_R_FAILED_TO_GET_PARAMETER);
             return 0;
         }
-        /* Our CID, to frame later epochs' records with (frame_cid) */
+        /*
+         * Our CID, to frame later epochs' records with (frame_cid).  DTLS
+         * 1.2 can have one while this epoch's records have another, in a
+         * renegotiation.
+         */
         p = prms.cid;
-        if (p != NULL && rl->cid_len == 0) {
+        if (p != NULL
+            && (rl->cid_len == 0 || rl->version != DTLS1_3_VERSION)) {
             void *cid = NULL;
             size_t len = 0;
 
